@@ -1,0 +1,155 @@
+{
+ "state": {
+  "on": false,
+  "bri": 128,
+  "transition": 7,
+  "bs": 0,
+  "ps": -1,
+  "pl": -1,
+  "ledmap": 0,
+  "AudioReactive": {
+   "on": false
+  },
+  "nl": {
+   "on": false,
+   "dur": 60,
+   "mode": 1,
+   "tbri": 0,
+   "rem": -1
+  },
+  "udpn": {
+   "send": false,
+   "recv": true,
+   "sgrp": 64,
+   "rgrp": 64
+  },
+  "lor": 0,
+  "mainseg": 0,
+  "seg": [
+   {
+    "id": 0,
+    "start": 0,
+    "stop": 240,
+    "len": 240,
+    "grp": 1,
+    "spc": 0,
+    "of": 0,
+    "on": true,
+    "frz": false,
+    "bri": 255,
+    "cct": 127,
+    "set": 0,
+    "lc": 1,
+    "col": [
+     [
+      255,
+      160,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "fx": 0,
+    "sx": 128,
+    "ix": 128,
+    "pal": 0,
+    "c1": 128,
+    "c2": 128,
+    "c3": 16,
+    "sel": true,
+    "rev": false,
+    "mi": false,
+    "o1": false,
+    "o2": false,
+    "o3": false,
+    "si": 0,
+    "m12": 0,
+    "bm": 0
+   }
+  ]
+ },
+ "info": {
+  "ver": "16.0.0",
+  "vid": 2605030,
+  "cn": "Niji",
+  "release": "ESP8266",
+  "repo": "wled/WLED",
+  "deviceId": "0000000000000000000000000000000000",
+  "leds": {
+   "count": 240,
+   "pwr": 320,
+   "fps": 0,
+   "maxpwr": 850,
+   "maxseg": 16,
+   "bootps": 0,
+   "seglc": [
+    1
+   ],
+   "lc": 1,
+   "rgbw": false,
+   "wv": 0,
+   "cct": 0
+  },
+  "str": false,
+  "name": "Meuble salle a mnger",
+  "udpport": 21324,
+  "simplifiedui": false,
+  "live": false,
+  "liveseg": -1,
+  "lm": "",
+  "lip": "",
+  "ws": 1,
+  "fxcount": 220,
+  "palcount": 72,
+  "cpalcount": 0,
+  "umpalcount": 0,
+  "cpalmax": 10,
+  "maps": [
+   {
+    "id": 0
+   }
+  ],
+  "wifi": {
+   "bssid": "00:00:00:00:00:00",
+   "rssi": -89,
+   "signal": 22,
+   "channel": 6,
+   "ap": false
+  },
+  "fs": {
+   "u": 40,
+   "t": 1024,
+   "pmt": 0
+  },
+  "ndc": 1,
+  "arch": "esp8266",
+  "core": "3.1.2",
+  "clock": 80,
+  "flash": 4,
+  "lwip": 2,
+  "freeheap": 16744,
+  "uptime": 510288,
+  "time": "1970-1-6, 21:44:48",
+  "um": [
+   32
+  ],
+  "u": {
+   "AudioReactive": [
+    "<button class=\"btn btn-xs\" onclick=\"requestJson({AudioReactive:{enabled:true}});\"><i class=\"icons off\">&#xe08f;</i></button>"
+   ]
+  },
+  "opt": 79,
+  "brand": "WLED",
+  "product": "FOSS",
+  "mac": "aabbcc112233",
+  "ip": "192.168.1.50"
+ }
+}

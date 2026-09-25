@@ -1,0 +1,3 @@
+# Jeux d'essai et rejeu hors ligne : outils de développement, inutiles côté
+# Jeedom. Les fixtures gardent une trace de réponses réelles de WLED.
+tests/
