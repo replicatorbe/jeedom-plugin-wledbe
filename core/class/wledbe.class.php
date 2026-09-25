@@ -72,38 +72,55 @@ class wledbe extends eqLogic {
 
     /* ================================================================ CRON */
 
-    /* Relevé de l'état de chaque appareil, une fois par minute. Si le démon
-     * est arrêté, le cron fait aussi avancer les scènes, à la minute près :
-     * une scène ne doit jamais rester allumée faute de démon. */
+    /*
+     * Une fois par minute :
+     *   - les scènes en retard sont avancées. C'est le travail du démon ; le
+     *     cron le fait s'il est arrêté, et de toute façon pour un réveil en
+     *     retard de plus de trente secondes : une scène ne doit jamais rester
+     *     allumée parce que le démon ne joint plus Jeedom ;
+     *   - l'état de tous les appareils est relu, en parallèle : le cron de
+     *     tous les plugins passe dans un seul processus, un WLED muet ne doit
+     *     pas y faire attendre les autres.
+     */
     public static function cron() {
-        $deadline = microtime(true) + self::CRON_BUDGET;
-        if (self::deamon_info()['state'] != 'ok') {
-            foreach (self::getSchedule()['timers'] as $timer) {
-                if ($timer['at'] <= time()) {
-                    $eqLogic = self::byId($timer['eq']);
-                    if (is_object($eqLogic)) {
-                        try {
-                            $eqLogic->tick();
-                        } catch (Throwable $e) {
-                            log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
-                        }
-                    }
+        $daemonOk = self::deamon_info()['state'] == 'ok';
+        foreach (self::getSchedule()['timers'] as $timer) {
+            if ($timer['at'] > time() || ($daemonOk && $timer['at'] > time() - 30)) {
+                continue;
+            }
+            $eqLogic = self::byId($timer['eq']);
+            if (is_object($eqLogic)) {
+                try {
+                    $eqLogic->tick();
+                } catch (Throwable $e) {
+                    log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
                 }
             }
         }
+
         $slowTurn = ((int) date('i')) % 5 === 0;
+        $due = array();
+        $urls = array();
         foreach (self::byType(__CLASS__, true) as $eqLogic) {
-            if (microtime(true) > $deadline) {
-                break;
-            }
             if (!$eqLogic->isConfigured()) {
                 continue;
             }
             if ((int) $eqLogic->getCache('failures', 0) >= self::OFFLINE_AFTER && !$slowTurn) {
                 continue;
             }
+            $due[$eqLogic->getId()] = $eqLogic;
+            $urls[$eqLogic->getId()] = 'http://' . $eqLogic->getConfiguration('ip') . '/json/si';
+        }
+        $timeout = self::timeout() * 1000;
+        foreach (self::multiGet($urls, min(3000, $timeout), $timeout) as $id => $body) {
+            $eqLogic = $due[$id];
             try {
-                $eqLogic->pollNow();
+                $data = $body === null ? null : json_decode($body, true);
+                if (!is_array($data)) {
+                    $eqLogic->noteFailure(__('pas de réponse au relevé', __FILE__));
+                    continue;
+                }
+                $eqLogic->ingest($data);
             } catch (Throwable $e) {
                 log::add(__CLASS__, 'debug', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
             }
@@ -159,6 +176,14 @@ class wledbe extends eqLogic {
                 @unlink($pid_file);
             }
         }
+        /* Un démon vivant qui ne joint plus Jeedom (clé API changée, accès
+         * API restreint) ne réveille plus rien : il est déclaré arrêté, pour
+         * que la gestion automatique le relance et que le cron prenne le
+         * relais entre-temps. Il rappelle au moins chaque minute. */
+        if ($return['state'] == 'ok' && time() - (int) @filemtime($pid_file) > 120
+            && time() - (int) cache::byKey('wledbe::daemon_seen')->getValue(0) > 150) {
+            $return['state'] = 'nok';
+        }
         return $return;
     }
 
@@ -172,10 +197,16 @@ class wledbe extends eqLogic {
         $cmd .= ' --loglevel ' . escapeshellarg(log::convertLogLevel(log::getLogLevel(__CLASS__)));
         $cmd .= ' --timezone ' . escapeshellarg(date_default_timezone_get());
 
-        /* La clé API passe par l'entrée standard, jamais en argument : ps est
-         * lisible par n'importe quel utilisateur local. */
-        $full = 'echo ' . escapeshellarg(jeedom::getApiKey(__CLASS__)) . ' | ' . $cmd
-              . ' >> ' . log::getPathToLog(__CLASS__ . 'd') . ' 2>&1 &';
+        /* La clé API passe par un fichier lisible du seul www-data, que le
+         * démon efface après l'avoir lu : ni en argument ni dans un « echo »,
+         * que ps montre à n'importe quel utilisateur local. */
+        $keyFile = jeedom::getTmpFolder(__CLASS__) . '/daemon.key';
+        @unlink($keyFile);
+        $old = umask(0077);
+        file_put_contents($keyFile, jeedom::getApiKey(__CLASS__));
+        umask($old);
+        $cmd .= ' --keyfile ' . escapeshellarg($keyFile);
+        $full = $cmd . ' >> ' . log::getPathToLog(__CLASS__ . 'd') . ' 2>&1 &';
         log::add(__CLASS__, 'info', __('Lancement du démon', __FILE__));
         exec($full);
 
@@ -212,9 +243,11 @@ class wledbe extends eqLogic {
         return jeedom::getTmpFolder(__CLASS__) . '/schedule.stamp';
     }
 
-    /* Le démon relit le planning quand ce fichier change. */
+    /* Le démon relit le planning quand le contenu de ce fichier change. Un
+     * contenu et non une date : filemtime() ne distingue pas deux
+     * changements dans la même seconde. */
     public static function notifyDaemon() {
-        @touch(self::stampFile());
+        @file_put_contents(self::stampFile(), sprintf('%.6f', microtime(true)));
     }
 
     /* Les prochains réveils, appareil par appareil. Autosuffisant : le démon
@@ -332,6 +365,11 @@ class wledbe extends eqLogic {
             return array();
         }
         $multi = curl_multi_init();
+        /* Un plafond : sans lui, deux interfaces réseau font plus de cinq
+         * cents connexions ouvertes d'un coup. */
+        if (defined('CURLMOPT_MAX_TOTAL_CONNECTIONS')) {
+            curl_multi_setopt($multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, 128);
+        }
         $handles = array();
         foreach ($_urls as $key => $url) {
             $ch = curl_init($url);
@@ -346,8 +384,10 @@ class wledbe extends eqLogic {
         }
         do {
             $status = curl_multi_exec($multi, $active);
-            if ($active) {
-                curl_multi_select($multi, 0.2);
+            /* select() rend -1 quand il n'a rien à surveiller : sans cette
+             * pause, la boucle tournerait à vide. */
+            if ($active && curl_multi_select($multi, 0.2) === -1) {
+                usleep(10000);
             }
         } while ($active && $status == CURLM_OK);
 
@@ -383,15 +423,27 @@ class wledbe extends eqLogic {
         return array(
             'ip'       => (string) $_ip,
             'mac'      => self::normalizeMac(isset($_info['mac']) ? $_info['mac'] : ''),
-            'name'     => isset($_info['name']) ? trim((string) $_info['name']) : '',
-            'version'  => isset($_info['ver']) ? (string) $_info['ver'] : '',
-            'arch'     => isset($_info['arch']) ? (string) $_info['arch'] : '',
+            'name'     => self::deviceText(isset($_info['name']) ? $_info['name'] : '', 64),
+            'version'  => self::deviceText(isset($_info['ver']) ? $_info['ver'] : '', 32),
+            'arch'     => self::deviceText(isset($_info['arch']) ? $_info['arch'] : '', 32),
             'leds'     => isset($leds['count']) ? (int) $leds['count'] : 0,
             'rgbw'     => !empty($leds['rgbw']) ? 1 : 0,
             'layout'   => $matrix !== null ? 'matrix' : 'strip',
             'matrix_w' => $matrix !== null && isset($matrix['w']) ? (int) $matrix['w'] : 0,
             'matrix_h' => $matrix !== null && isset($matrix['h']) ? (int) $matrix['h'] : 0,
         );
+    }
+
+    /* Un texte fourni par un appareil : n'importe qui sur le réseau local
+     * peut renommer un WLED, ou se faire passer pour un. Jamais de balisage,
+     * jamais de longueur démesurée. */
+    public static function deviceText($_value, $_max) {
+        if (!is_scalar($_value)) {
+            return '';
+        }
+        $text = trim(strip_tags((string) $_value));
+        $text = str_replace(array('<', '>'), '', $text);
+        return mb_substr($text, 0, $_max);
     }
 
     public static function probe($_ip) {
@@ -444,18 +496,38 @@ class wledbe extends eqLogic {
             return null;
         }
         $out = array();
-        exec('timeout ' . (int) self::MDNS_SECONDS . ' avahi-browse -rtpk _wled._tcp 2>/dev/null', $out);
+        exec('timeout ' . (int) self::MDNS_SECONDS . ' avahi-browse -rtpk _wled._tcp 2>/dev/null', $out, $rc);
+        /* 124 : coupé par timeout, ce qu'on a lu reste bon. Tout autre échec
+         * (démon avahi arrêté) : pas de mDNS, et l'interface doit le dire. */
+        if ($rc !== 0 && $rc !== 124 && empty($out)) {
+            return null;
+        }
         return self::parseAvahi($out);
     }
 
-    private static function localIps() {
+    /* Interfaces qui ne mènent pas au réseau de la maison : ponts Docker et
+     * machines virtuelles, VPN. Les balayer ajouterait 254 requêtes chacune,
+     * pour rien. */
+    const VIRTUAL_INTERFACES = '/^(docker|br-|veth|virbr|lxc|lxd|tun|tap|wg|tailscale|zt|vmnet|vboxnet|cni|flannel|kube)/';
+
+    public static function localIps() {
         $ips = array();
         $out = array();
-        @exec('hostname -I 2>/dev/null', $out);
-        foreach (preg_split('/\s+/', trim(implode(' ', $out))) as $ip) {
-            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && strpos($ip, '127.') !== 0
-                && strpos($ip, '172.17.') !== 0) {
-                $ips[] = $ip;
+        @exec('ip -4 -o addr show scope global 2>/dev/null', $out);
+        foreach ($out as $line) {
+            /* « 2: ens18    inet 192.168.1.10/24 brd … » */
+            if (preg_match('/^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)\//', $line, $m)
+                && !preg_match(self::VIRTUAL_INTERFACES, $m[1])) {
+                $ips[] = $m[2];
+            }
+        }
+        if (empty($out)) {
+            @exec('hostname -I 2>/dev/null', $out);
+            foreach (preg_split('/\s+/', trim(implode(' ', $out))) as $ip) {
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && strpos($ip, '127.') !== 0
+                    && strpos($ip, '172.17.') !== 0) {
+                    $ips[] = $ip;
+                }
             }
         }
         if (empty($ips)) {
@@ -464,7 +536,27 @@ class wledbe extends eqLogic {
                 $ips[] = $internal;
             }
         }
-        return $ips;
+        return array_values(array_unique($ips));
+    }
+
+    /* Préfixe à balayer (trois octets) d'après la saisie : « 192.168.1 »,
+     * « 192.168.1.0 » ou « 192.168.1.0/24 ». Le balayage couvre un /24 et
+     * rien d'autre : un autre masque est refusé plutôt que tronqué en
+     * silence. */
+    public static function subnetPrefix($_subnet) {
+        $subnet = trim((string) $_subnet);
+        if (!preg_match('/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\.(\d{1,3}))?(?:\/(\d{1,2}))?$/', $subnet, $m)) {
+            throw new Exception(__('Sous-réseau illisible : saisissez par exemple 192.168.1.0/24.', __FILE__));
+        }
+        foreach (array(1, 2, 3, 4) as $i) {
+            if (isset($m[$i]) && $m[$i] !== '' && (int) $m[$i] > 255) {
+                throw new Exception(__('Sous-réseau illisible : saisissez par exemple 192.168.1.0/24.', __FILE__));
+            }
+        }
+        if (isset($m[5]) && $m[5] !== '' && (int) $m[5] !== 24) {
+            throw new Exception(__('Seul un sous-réseau en /24 (256 adresses) peut être parcouru. Pour un réseau plus grand, faites plusieurs recherches.', __FILE__));
+        }
+        return (int) $m[1] . '.' . (int) $m[2] . '.' . (int) $m[3];
     }
 
     /*
@@ -479,10 +571,7 @@ class wledbe extends eqLogic {
         $prefixes = array();
         $subnet = trim((string) $_subnet);
         if ($subnet !== '') {
-            if (!preg_match('/^(\d{1,3}\.\d{1,3}\.\d{1,3})(\.\d{1,3}(\/\d+)?)?$/', $subnet, $m)) {
-                throw new Exception(__('Sous-réseau illisible : saisissez par exemple 192.168.1.0/24.', __FILE__));
-            }
-            $prefixes[] = $m[1];
+            $prefixes[] = self::subnetPrefix($subnet);
         } else {
             foreach (self::localIps() as $ip) {
                 $prefixes[] = substr($ip, 0, strrpos($ip, '.'));
@@ -557,10 +646,28 @@ class wledbe extends eqLogic {
         if (!is_array($notified)) {
             $notified = array();
         }
+        /* Un appareil signalé il y a plus d'un mois l'est à nouveau : son
+         * équipement a pu être supprimé depuis. */
+        foreach ($notified as $mac => $at) {
+            if ((int) $at < time() - 30 * 86400) {
+                unset($notified[$mac]);
+            }
+        }
         foreach ($entries as $entry) {
             $eqLogic = $entry['mac'] !== '' ? self::byLogicalId($entry['mac'], __CLASS__) : null;
             if (is_object($eqLogic)) {
                 if ($eqLogic->getConfiguration('ip') !== $entry['ip']) {
+                    /* Le TXT mDNS n'est qu'une annonce, que n'importe qui peut
+                     * émettre : l'appareil est interrogé, et sa MAC vérifiée,
+                     * avant de lui confier l'équipement. */
+                    try {
+                        $device = self::probe($entry['ip']);
+                    } catch (Throwable $e) {
+                        continue;
+                    }
+                    if ($device['mac'] !== $eqLogic->getLogicalId()) {
+                        continue;
+                    }
                     log::add(__CLASS__, 'info', $eqLogic->getHumanName() . ' : '
                         . sprintf(__('nouvelle adresse %s (était %s)', __FILE__), $entry['ip'], $eqLogic->getConfiguration('ip')));
                     $eqLogic->setConfiguration('ip', $entry['ip']);
@@ -598,7 +705,9 @@ class wledbe extends eqLogic {
         }
         $eqLogic = self::byLogicalId($mac, __CLASS__);
         if (is_object($eqLogic)) {
-            if ($eqLogic->getConfiguration('ip') !== $ip || $eqLogic->applyInfo($_device)) {
+            $moved = $eqLogic->getConfiguration('ip') !== $ip;
+            $changed = $eqLogic->applyInfo($_device);
+            if ($moved || $changed) {
                 $eqLogic->setConfiguration('ip', $ip);
                 $eqLogic->save();
             }
@@ -640,7 +749,9 @@ class wledbe extends eqLogic {
     }
 
     /* Recopie ce que /json/info dit de l'appareil. Renvoie vrai si quelque
-     * chose a changé — l'appelant décide alors d'enregistrer. */
+     * chose a changé — l'appelant décide alors d'enregistrer. La MAC n'est
+     * écrite qu'une fois : c'est l'identité de l'équipement, un autre
+     * appareil qui répondrait à la même adresse ne doit pas la remplacer. */
     public function applyInfo($_device) {
         $changed = false;
         foreach (array('mac', 'name' => 'device_name', 'version', 'arch', 'leds', 'rgbw', 'layout', 'matrix_w', 'matrix_h') as $field => $key) {
@@ -648,6 +759,9 @@ class wledbe extends eqLogic {
                 $field = $key;
             }
             if (!isset($_device[$field])) {
+                continue;
+            }
+            if ($key === 'mac' && ($_device['mac'] === '' || (string) $this->getConfiguration('mac', '') !== '')) {
                 continue;
             }
             $value = $_device[$field];
@@ -674,7 +788,7 @@ class wledbe extends eqLogic {
     public static function effectList($_names, $_fxdata, $_matrix) {
         $list = array();
         foreach ((array) $_names as $id => $name) {
-            $name = trim((string) $name);
+            $name = self::deviceText($name, 48);
             if ($name === '' || $name === 'RSVD' || $name === '-') {
                 continue;
             }
@@ -707,7 +821,10 @@ class wledbe extends eqLogic {
             if ((int) $id <= 0 || !is_array($preset) || empty($preset)) {
                 continue;
             }
-            $name = isset($preset['n']) && trim((string) $preset['n']) !== '' ? trim((string) $preset['n']) : 'Preset ' . $id;
+            $name = isset($preset['n']) ? self::deviceText($preset['n'], 48) : '';
+            if ($name === '') {
+                $name = 'Preset ' . $id;
+            }
             if (isset($preset['playlist'])) {
                 $name .= ' (playlist)';
             }
@@ -743,6 +860,8 @@ class wledbe extends eqLogic {
         } catch (Throwable $e) {
             $presets = array();
         }
+        $effects = array_map(function ($n) { return wledbe::deviceText($n, 48); }, $effects);
+        $palettes = array_map(function ($n) { return wledbe::deviceText($n, 48); }, $palettes);
         $this->setCache('fx_names', $effects);
         $this->setCache('pal_names', $palettes);
         $this->setCache('preset_names', self::presetList($presets));
@@ -750,7 +869,7 @@ class wledbe extends eqLogic {
         $this->updateList('effect_set', self::effectList($effects, $fxdata, $this->isMatrix()));
         $pal = array();
         foreach ($palettes as $id => $name) {
-            $pal[(int) $id] = (string) $name;
+            $pal[(int) $id] = self::deviceText($name, 48);
         }
         $this->updateList('palette_set', $pal);
         $this->updateList('preset_set', self::presetList($presets));
@@ -797,18 +916,37 @@ class wledbe extends eqLogic {
     public function ingest($_data) {
         $state = isset($_data['state']) && is_array($_data['state']) ? $_data['state'] : array();
         $info = isset($_data['info']) && is_array($_data['info']) ? $_data['info'] : array();
+
+        /* Un autre WLED répond à cette adresse (IP réattribuée par le DHCP,
+         * deux appareils qui l'ont échangée) : rien de ce qu'il dit ne
+         * concerne cet équipement. Compter un échec suffit : au troisième, la
+         * découverte horaire cherche la nouvelle adresse du bon appareil. */
+        $known = (string) $this->getConfiguration('mac', '');
+        $mac = self::normalizeMac(isset($info['mac']) ? $info['mac'] : '');
+        if ($known !== '' && $mac !== '' && $mac !== $known) {
+            $this->noteFailure(sprintf(__('un autre WLED (%s) répond à l\'adresse %s', __FILE__), $mac, $this->getConfiguration('ip')));
+            return;
+        }
+
         $this->clearFailure();
         $this->setCache('raw', $_data);
         $this->setCache('raw_at', date('Y-m-d H:i:s'));
 
         if (self::looksLikeWled($info)) {
-            if ($this->applyInfo(self::describe($info, $this->getConfiguration('ip')))) {
-                $this->save(true);
+            $device = self::describe($info, $this->getConfiguration('ip'));
+            /* L'objet a pu être chargé bien avant ce relevé : on repart de la
+             * base, pour ne pas y réécrire un nom ou une adresse que
+             * l'utilisateur vient de changer. */
+            if ($this->getId() != '' && $this->applyInfo($device)) {
+                $this->refresh();
+                if ($this->applyInfo($device)) {
+                    $this->save();
+                }
             }
             /* Nouvelle version ou nouveau nombre d'effets : les numéros ont pu
              * changer, les listes sont relues. */
-            $signature = $info['ver'] . '|' . (isset($info['fxcount']) ? $info['fxcount'] : '') . '|'
-                . (isset($info['palcount']) ? $info['palcount'] : '') . '|' . $this->getConfiguration('layout');
+            $signature = $device['version'] . '|' . (isset($info['fxcount']) ? (int) $info['fxcount'] : '') . '|'
+                . (isset($info['palcount']) ? (int) $info['palcount'] : '') . '|' . $this->getConfiguration('layout');
             if ($this->getCache('lists_sig', '') !== $signature) {
                 try {
                     $this->refreshLists();
@@ -922,13 +1060,14 @@ class wledbe extends eqLogic {
                 continue;
             }
             if ($key === 'seg') {
-                $out = array_merge($out, self::segMismatches($value, isset($_state['seg']) ? $_state['seg'] : array()));
+                $out = array_merge($out, self::segMismatches($value, isset($_state['seg']) ? $_state['seg'] : array(),
+                    isset($_state['mainseg']) ? (int) $_state['mainseg'] : 0));
                 continue;
             }
             /* « bri »:0 éteint WLED sans changer la luminosité retenue. */
             if ($key === 'bri' && is_numeric($value) && (int) $value === 0) {
                 if (!empty($_state['on'])) {
-                    $out[] = 'on = 1 ' . __('au lieu de', __FILE__) . ' 0';
+                    $out[] = 'on = true ' . __('au lieu de', __FILE__) . ' false';
                 }
                 continue;
             }
@@ -970,17 +1109,26 @@ class wledbe extends eqLogic {
         } elseif ((string) $sent === (string) $actual) {
             return array();
         }
-        return array($_label . ' = ' . var_export($actual, true) . ' ' . __('au lieu de', __FILE__) . ' ' . var_export($sent, true));
+        return array($_label . ' = ' . self::showValue($_actual) . ' ' . __('au lieu de', __FILE__) . ' ' . self::showValue($_sent));
     }
 
-    /* Une valeur relative (« ~10 », « ~-10 », « t » pour basculer, « r »
-     * pour aléatoire) ne se compare pas à l'état relu. */
+    /* Une valeur relue sur l'appareil, pour un message : elle finit dans une
+     * commande info et dans le centre de messages, jamais sous forme de
+     * balisage. */
+    public static function showValue($_value) {
+        $text = json_encode($_value, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        return mb_substr((string) $text, 0, 80);
+    }
+
+    /* Une valeur relative ne se compare pas à l'état relu : « ~10 »,
+     * « ~-10 », « w~10 » (avec retour au début), « 1~5~ » (preset suivant
+     * dans une plage), « t » pour basculer, « r » pour aléatoire, « !… ». */
     private static function isAbsolute($_value) {
         if (!is_string($_value)) {
             return true;
         }
         $v = trim($_value);
-        return !($v === 't' || $v === 'r' || strpos($v, '~') === 0 || strpos($v, '!') === 0);
+        return !($v === 't' || $v === 'r' || strpos($v, '~') !== false || strpos($v, '!') === 0);
     }
 
     /* Un ordre qui contient une valeur relative ne se renvoie pas : un
@@ -1003,7 +1151,7 @@ class wledbe extends eqLogic {
      * segments sélectionnés, ou au principal si aucun ne l'est — soit une
      * liste, dont chaque élément vise son « id » ou, à défaut, son rang.
      */
-    public static function segMismatches($_sent, $_segs) {
+    public static function segMismatches($_sent, $_segs, $_mainseg = 0) {
         $segs = array();
         foreach ((array) $_segs as $rank => $seg) {
             if (is_array($seg)) {
@@ -1022,7 +1170,7 @@ class wledbe extends eqLogic {
                     }
                 }
                 if (empty($selected) && !empty($segs)) {
-                    $selected[] = (int) key($segs);
+                    $selected[] = isset($segs[$_mainseg]) ? $_mainseg : (int) key($segs);
                 }
                 foreach ($selected as $id) {
                     $orders[] = array($id, $_sent);
@@ -1055,6 +1203,14 @@ class wledbe extends eqLogic {
                     $out = array_merge($out, self::colorMismatches($id, $value, isset($segs[$id]['col']) ? $segs[$id]['col'] : array()));
                     continue;
                 }
+                /* Comme au niveau général, « bri »:0 éteint le segment sans
+                 * changer sa luminosité retenue. */
+                if ($key === 'bri' && is_numeric($value) && (int) $value === 0) {
+                    if (!empty($segs[$id]['on'])) {
+                        $out[] = 'seg ' . $id . '.on = true ' . __('au lieu de', __FILE__) . ' false';
+                    }
+                    continue;
+                }
                 if (array_key_exists($key, $segs[$id])) {
                     $out = array_merge($out, self::valueMismatches('seg ' . $id . '.' . $key, $value, $segs[$id][$key]));
                 }
@@ -1074,14 +1230,18 @@ class wledbe extends eqLogic {
             } catch (Throwable $e) {
                 continue;
             }
-            $have = isset($_actual[$slot]) ? (is_string($_actual[$slot]) ? self::hexToColor($_actual[$slot]) : array_values((array) $_actual[$slot])) : array();
+            try {
+                $have = isset($_actual[$slot]) ? (is_string($_actual[$slot]) ? self::hexToColor($_actual[$slot]) : array_values((array) $_actual[$slot])) : array();
+            } catch (Throwable $e) {
+                $have = array();
+            }
             $n = min(count($wanted), count($have));
             $same = $n > 0;
             for ($i = 0; $i < $n; $i++) {
                 $same = $same && (int) $wanted[$i] === (int) $have[$i];
             }
             if (!$same) {
-                $out[] = 'seg ' . $_id . '.col[' . $slot . '] = ' . json_encode($have) . ' ' . __('au lieu de', __FILE__) . ' ' . json_encode($wanted);
+                $out[] = 'seg ' . $_id . '.col[' . $slot . '] = ' . self::showValue($have) . ' ' . __('au lieu de', __FILE__) . ' ' . self::showValue($wanted);
             }
         }
         return $out;
@@ -1205,11 +1365,30 @@ class wledbe extends eqLogic {
         if (is_string($scenes) && $scenes !== '') {
             $scenes = json_decode($scenes, true);
         }
-        if (!is_array($scenes) || empty($scenes)) {
+        /* Une liste enregistrée vide reste vide : l'utilisateur a supprimé
+         * toutes les scènes, elles ne doivent pas revenir sans leurs
+         * commandes. */
+        if (!is_array($scenes)) {
             $scenes = self::DEFAULT_SCENES;
         }
         return array_values(array_map(array(__CLASS__, 'normalizeScene'), $scenes));
     }
+
+    /* Un nombre saisi dans l'éditeur : un champ vidé vaut « non renseigné »,
+     * pas zéro — une durée vidée ne doit pas devenir une scène sans fin. */
+    private static function intField($_array, $_key, $_default, $_min, $_max) {
+        if (!isset($_array[$_key]) || $_array[$_key] === '' || !is_numeric($_array[$_key])) {
+            return $_default;
+        }
+        return max($_min, min($_max, (int) $_array[$_key]));
+    }
+
+    /* Texte défilant : WLED garde au plus 32 octets de nom de segment sur un
+     * ESP8266. Au-delà il le tronque, la vérification ne concorderait
+     * jamais, et une coupure au milieu d'un caractère accentué rendrait son
+     * JSON illisible. mb_strcut coupe en octets, sur une frontière de
+     * caractère. */
+    const SEGMENT_NAME_BYTES = 32;
 
     public static function normalizeRecipe($_recipe, $_isMatrix) {
         $r = is_array($_recipe) ? $_recipe : array();
@@ -1222,10 +1401,10 @@ class wledbe extends eqLogic {
             'effect'     => isset($r['effect']) ? trim((string) $r['effect']) : 'Solid',
             'colors'     => $colors,
             'palette'    => isset($r['palette']) ? trim((string) $r['palette']) : '',
-            'brightness' => max(1, min(100, isset($r['brightness']) ? (int) $r['brightness'] : 100)),
-            'speed'      => max(0, min(255, isset($r['speed']) ? (int) $r['speed'] : 128)),
-            'intensity'  => max(0, min(255, isset($r['intensity']) ? (int) $r['intensity'] : 128)),
-            'text'       => isset($r['text']) ? mb_substr(trim((string) $r['text']), 0, 64) : '',
+            'brightness' => self::intField($r, 'brightness', 100, 1, 100),
+            'speed'      => self::intField($r, 'speed', 128, 0, 255),
+            'intensity'  => self::intField($r, 'intensity', 128, 0, 255),
+            'text'       => isset($r['text']) ? trim(mb_strcut(trim(strip_tags((string) $r['text'])), 0, self::SEGMENT_NAME_BYTES, 'UTF-8')) : '',
             'json'       => isset($r['json']) ? trim((string) $r['json']) : '',
         );
         if ($recipe['effect'] === '') {
@@ -1239,8 +1418,8 @@ class wledbe extends eqLogic {
 
     public static function normalizeScene($_scene) {
         $s = is_array($_scene) ? $_scene : array();
-        $name = isset($s['name']) ? trim((string) $s['name']) : '';
-        $id = isset($s['id']) ? preg_replace('/[^a-z0-9_]/', '', strtolower((string) $s['id'])) : '';
+        $name = isset($s['name']) ? self::deviceText($s['name'], 48) : '';
+        $id = isset($s['id']) && is_scalar($s['id']) ? substr(preg_replace('/[^a-z0-9_]/', '', strtolower((string) $s['id'])), 0, 32) : '';
         if ($id === '') {
             $id = self::slug($name !== '' ? $name : 'scene');
         }
@@ -1248,8 +1427,8 @@ class wledbe extends eqLogic {
         return array(
             'id'       => $id,
             'name'     => $name !== '' ? $name : $id,
-            'priority' => max(0, min(100, isset($s['priority']) ? (int) $s['priority'] : 50)),
-            'duration' => max(0, min(86400, isset($s['duration']) ? (int) $s['duration'] : 60)),
+            'priority' => self::intField($s, 'priority', 50, 0, 100),
+            'duration' => self::intField($s, 'duration', 60, 0, 86400),
             'end'      => $end,
             'guard'    => !empty($s['guard']) ? 1 : 0,
             'strip'    => self::normalizeRecipe(isset($s['strip']) ? $s['strip'] : array(), false),
@@ -1258,7 +1437,7 @@ class wledbe extends eqLogic {
     }
 
     public static function slug($_text) {
-        $text = strtolower(trim((string) $_text));
+        $text = mb_strtolower(trim((string) $_text), 'UTF-8');
         $text = strtr($text, array('à' => 'a', 'â' => 'a', 'ä' => 'a', 'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e',
                                    'î' => 'i', 'ï' => 'i', 'ô' => 'o', 'ö' => 'o', 'ù' => 'u', 'û' => 'u', 'ü' => 'u', 'ç' => 'c'));
         $text = trim(preg_replace('/[^a-z0-9]+/', '_', $text), '_');
@@ -1301,6 +1480,7 @@ class wledbe extends eqLogic {
         foreach (self::byType(__CLASS__) as $eqLogic) {
             try {
                 $eqLogic->syncSceneCommands($out);
+                $eqLogic->purgeScenes($ids);
             } catch (Throwable $e) {
                 log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
             }
@@ -1333,6 +1513,8 @@ class wledbe extends eqLogic {
         if ($text === '') {
             return $options;
         }
+        /* « durée=5 min » s'écrit naturellement avec une espace. */
+        $text = preg_replace('/(\d)\s+(s|sec|min|m|h)\b/iu', '$1$2', $text);
         foreach (preg_split('/[\s;]+/', $text) as $token) {
             if ($token === '') {
                 continue;
@@ -1394,7 +1576,7 @@ class wledbe extends eqLogic {
     }
 
     public static function parseSeconds($_value) {
-        $v = strtolower(trim((string) $_value));
+        $v = mb_strtolower(trim((string) $_value), 'UTF-8');
         if (in_array($v, array('0', 'infini', 'sansfin', 'illimite', 'illimitee', 'none'), true)) {
             return 0;
         }
@@ -1528,28 +1710,92 @@ class wledbe extends eqLogic {
      * se termine, la suivante reprend la main ; quand il n'y en a plus,
      * l'éclairage d'avant la première scène est rendu.
      *
-     * La pile vit dans le cache de l'équipement et n'est modifiée que sous un
-     * verrou : un scénario d'alarme et le réveil du démon peuvent arriver en
+     * Chaque entrée emporte la définition de sa scène au moment du lancement :
+     * modifier la bibliothèque ne change pas une scène déjà en cours.
+     *
+     * Cet état vit sous sa propre clé de cache, et non dans le cache de
+     * l'équipement : celui-ci est récrit en entier à chaque setCache(), sans
+     * verrou, par le relevé de chaque minute, qui écraserait sinon une pile
+     * modifiée au même instant. Il n'est modifié que sous un verrou de
+     * fichier : un scénario d'alarme et le réveil du démon peuvent arriver en
      * même temps.
      */
-    private function withLock($_callback) {
-        $file = jeedom::getTmpFolder(__CLASS__) . '/stack_' . (int) $this->getId() . '.lock';
-        $handle = @fopen($file, 'c');
-        if ($handle === false) {
+
+    /* Après ce délai sans réussir à rendre l'éclairage, on abandonne : une
+     * restauration tardive écraserait ce que l'utilisateur a fait depuis. */
+    const RESTORE_GIVE_UP = 1800;
+
+    /* Verrous tenus par ce processus : un scénario synchrone déclenché par une
+     * mise à jour de commande pendant qu'on tient le verrou peut rappeler le
+     * même équipement, et un second flock() sur le même fichier depuis le
+     * même processus attendrait indéfiniment. */
+    private static $_locks = array();
+
+    private function sceneKey() {
+        return 'wledbe::scene::' . (int) $this->getId();
+    }
+
+    public function sceneState() {
+        $state = cache::byKey($this->sceneKey())->getValue(array());
+        return is_array($state) ? $state : array();
+    }
+
+    private function sceneGet($_key, $_default = null) {
+        $state = $this->sceneState();
+        return array_key_exists($_key, $state) ? $state[$_key] : $_default;
+    }
+
+    /* Écrit plusieurs clés d'un coup ; null efface la clé. */
+    private function sceneSet($_values) {
+        $state = $this->sceneState();
+        foreach ($_values as $key => $value) {
+            if ($value === null) {
+                unset($state[$key]);
+            } else {
+                $state[$key] = $value;
+            }
+        }
+        cache::set($this->sceneKey(), $state);
+    }
+
+    /* $_wait faux : rend null sans attendre si le verrou est pris. */
+    private function withLock($_callback, $_wait = true) {
+        $id = (int) $this->getId();
+        if (!empty(self::$_locks[$id])) {
             return $_callback();
         }
-        flock($handle, LOCK_EX);
+        $file = jeedom::getTmpFolder(__CLASS__) . '/stack_' . $id . '.lock';
+        $handle = @fopen($file, 'c');
+        if ($handle === false) {
+            log::add(__CLASS__, 'warning', $this->getHumanName() . ' : ' . __('verrou des scènes impossible à ouvrir :', __FILE__) . ' ' . $file);
+            return $_callback();
+        }
+        if (!flock($handle, $_wait ? LOCK_EX : (LOCK_EX | LOCK_NB))) {
+            fclose($handle);
+            return null;
+        }
+        self::$_locks[$id] = true;
         try {
             return $_callback();
         } finally {
+            unset(self::$_locks[$id]);
             flock($handle, LOCK_UN);
             fclose($handle);
         }
     }
 
     public function stack() {
-        $stack = $this->getCache('stack', array());
+        $stack = $this->sceneGet('stack', array());
         return is_array($stack) ? $stack : array();
+    }
+
+    private static function hasActive($_stack) {
+        foreach ($_stack as $entry) {
+            if (!empty($entry['active'])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /* L'entrée à afficher : la plus prioritaire des actives, la plus récente
@@ -1568,18 +1814,25 @@ class wledbe extends eqLogic {
         return $top;
     }
 
-    /* Lance une scène sur cet appareil, tout de suite ou après un délai. */
+    /* Lance une scène de la bibliothèque sur cet appareil, tout de suite ou
+     * après un délai. */
     public function startScene($_ref, $_options = array()) {
-        $scene = self::findScene($_ref);
+        return $this->playScene(self::findScene($_ref), $_options);
+    }
+
+    /* Lance une définition de scène, enregistrée ou non (essai depuis
+     * l'éditeur). */
+    public function playScene($_scene, $_options = array()) {
+        $scene = self::normalizeScene($_scene);
         return $this->withLock(function () use ($scene, $_options) {
             $now = time();
-            $stack = $this->stack();
-            $seq = (int) $this->getCache('seq', 0) + 1;
-            $this->setCache('seq', $seq);
+            $seq = (int) $this->sceneGet('seq', 0) + 1;
             $entry = array(
                 'key'      => $scene['id'],
                 'scene'    => $scene['id'],
                 'name'     => $scene['name'],
+                'def'      => $scene,
+                'test'     => !empty($_options['test']),
                 'priority' => isset($_options['priority']) ? (int) $_options['priority'] : $scene['priority'],
                 'duration' => isset($_options['duration']) ? (int) $_options['duration'] : $scene['duration'],
                 'end'      => isset($_options['end']) ? $_options['end'] : $scene['end'],
@@ -1591,13 +1844,14 @@ class wledbe extends eqLogic {
             );
             /* Relancer une scène déjà présente la remplace : sa durée repart
              * de zéro, elle ne s'empile pas deux fois. */
-            $stack = array_values(array_filter($stack, function ($e) use ($entry) { return $e['key'] !== $entry['key']; }));
+            $stack = array_values(array_filter($this->stack(), function ($e) use ($entry) { return $e['key'] !== $entry['key']; }));
             $stack[] = $entry;
-            $this->setCache('stack', $stack);
+            $this->sceneSet(array('seq' => $seq, 'stack' => $stack));
             if ($entry['start_at'] > $now) {
                 log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . sprintf(__('scène « %s » programmée à %s', __FILE__), $entry['name'], date('H:i:s', $entry['start_at'])));
-                $this->publishScene();
-                self::notifyDaemon();
+                /* Si l'entrée remplacée était affichée, l'appareil doit passer
+                 * à la suivante (ou revenir à l'éclairage) pendant l'attente. */
+                $this->showTop(null);
                 return $entry;
             }
             $this->activateDue($now, $entry['key']);
@@ -1612,7 +1866,7 @@ class wledbe extends eqLogic {
      */
     private function activateDue($_now, $_forceKey = null) {
         $stack = $this->stack();
-        $ended = null;
+        $applied = (string) $this->sceneGet('applied_key', '');
         foreach ($stack as $i => $entry) {
             if (empty($entry['active']) && $entry['start_at'] <= $_now) {
                 $stack[$i]['active'] = true;
@@ -1621,15 +1875,20 @@ class wledbe extends eqLogic {
                     $entry['name'], $entry['priority'], $entry['duration'] > 0 ? $entry['duration'] . ' s' : __('sans fin', __FILE__)));
             }
         }
+        /* Si plusieurs scènes finissent ensemble, c'est le mode de fin de
+         * celle qui était affichée qui compte, à défaut la plus prioritaire. */
+        $ended = null;
         foreach ($stack as $i => $entry) {
             if (!empty($entry['active']) && $entry['until'] > 0 && $entry['until'] <= $_now) {
                 log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . sprintf(__('scène « %s » terminée', __FILE__), $entry['name']));
-                $ended = $entry;
+                if ($ended === null || $entry['key'] === $applied
+                    || ($ended['key'] !== $applied && $entry['priority'] > $ended['priority'])) {
+                    $ended = $entry;
+                }
                 unset($stack[$i]);
             }
         }
-        $stack = array_values($stack);
-        $this->setCache('stack', $stack);
+        $this->sceneSet(array('stack' => array_values($stack)));
         $this->showTop($ended, $_forceKey);
     }
 
@@ -1638,77 +1897,132 @@ class wledbe extends eqLogic {
      * dernière entrée retirée : c'est son mode de fin qui s'applique quand la
      * pile se vide. $_forceKey : une scène qu'on vient de relancer, à rejouer
      * même si elle était déjà affichée.
+     *
+     * Une scène injouable (effet absent de ce WLED…) est retirée de la pile
+     * et la suivante essayée ; l'erreur est rendue à l'appelant à la fin. Un
+     * appareil muet laisse la pile en l'état : tick() réessaiera.
      */
     private function showTop($_ended, $_forceKey = null) {
-        $top = self::topEntry($this->stack());
-        $applied = (string) $this->getCache('applied_key', '');
-        if ($top !== null) {
-            if ($top['key'] !== $applied || $top['key'] === $_forceKey) {
-                $this->applyEntry($top);
+        $error = null;
+        try {
+            for ($guard = 0; $guard < 20; $guard++) {
+                $top = self::topEntry($this->stack());
+                $applied = (string) $this->sceneGet('applied_key', '');
+                if ($top === null) {
+                    /* Rien à rendre si aucune scène n'a jamais été affichée. */
+                    if ($applied !== '' || is_array($this->sceneGet('snapshot', null))) {
+                        $this->endScenes($_ended !== null ? $_ended['end'] : 'restore');
+                    }
+                    break;
+                }
+                if ($top['key'] === $applied && $top['key'] !== $_forceKey) {
+                    break;
+                }
+                try {
+                    $this->applyEntry($top);
+                    break;
+                } catch (wledbeSceneError $e) {
+                    $error = $e;
+                    $this->dropEntry($top, $e->getMessage());
+                    $_ended = $top;
+                    $_forceKey = null;
+                }
             }
-        } elseif ($applied !== '') {
-            $this->endScenes($_ended !== null ? $_ended['end'] : 'restore');
+        } finally {
+            $this->publishScene();
+            self::notifyDaemon();
         }
-        $this->publishScene();
-        self::notifyDaemon();
+        if ($error !== null) {
+            throw $error;
+        }
+    }
+
+    private function dropEntry($_entry, $_reason) {
+        $stack = array_values(array_filter($this->stack(), function ($e) use ($_entry) { return $e['key'] !== $_entry['key']; }));
+        $this->sceneSet(array('stack' => $stack));
+        log::add(__CLASS__, 'error', $this->getHumanName() . ' : ' . $_reason);
+        message::add(__CLASS__, $this->getHumanName() . ' : ' . $_reason, '', 'scene' . $this->getId());
     }
 
     private function applyEntry($_entry) {
+        $scene = isset($_entry['def']) && is_array($_entry['def']) ? $_entry['def'] : null;
+        if ($scene === null) {
+            try {
+                $scene = self::findScene($_entry['scene']);
+            } catch (Throwable $e) {
+                throw new wledbeSceneError($e->getMessage());
+            }
+        }
         /* L'éclairage d'avant n'est photographié qu'une fois, à l'entrée dans
          * la première scène : une scène qui en remplace une autre ne doit pas
-         * prendre la précédente pour l'état à rendre. */
-        $snapshot = $this->getCache('snapshot', null);
+         * prendre la précédente pour l'état à rendre. Une restauration encore
+         * en souffrance garde aussi sa photographie : c'est elle, et non la
+         * scène restée affichée, qu'il faudra rendre. */
+        $snapshot = $this->sceneGet('snapshot', null);
         if (!is_array($snapshot) || empty($snapshot)) {
-            $snapshot = $this->call('GET', '/json/state');
-            $this->setCache('snapshot', $snapshot);
-            $this->setCache('pending_restore', null);
+            try {
+                $snapshot = $this->call('GET', '/json/state');
+            } catch (Throwable $e) {
+                $this->sceneSet(array('retry_at' => time() + self::RESTORE_RETRY));
+                throw $e;
+            }
+            $this->sceneSet(array('snapshot' => $snapshot));
         }
-        $fragment = $this->sceneFragment(self::findScene($_entry['scene']), $snapshot);
-        $this->setCache('applied_key', $_entry['key']);
-        $this->setCache('applied_fragment', $fragment);
-        $this->setCache('guard_at', time() + self::GUARD_EVERY);
-        $this->sendState($fragment);
+        try {
+            $fragment = $this->sceneFragment($scene, $snapshot);
+        } catch (Throwable $e) {
+            throw new wledbeSceneError($e->getMessage());
+        }
+        $this->sceneSet(array('pending_restore' => null, 'restore_at' => null, 'restore_since' => null));
+        try {
+            $this->sendState($fragment);
+        } catch (Throwable $e) {
+            $this->sceneSet(array('applied_key' => null, 'applied_fragment' => null, 'retry_at' => time() + self::RESTORE_RETRY));
+            throw $e;
+        }
+        $this->sceneSet(array('applied_key' => $_entry['key'], 'applied_fragment' => $fragment,
+                              'guard_at' => time() + self::GUARD_EVERY, 'retry_at' => null));
     }
 
     /* La pile est vide : on rend l'éclairage, on éteint, ou on laisse. */
     private function endScenes($_mode) {
-        $snapshot = $this->getCache('snapshot', null);
-        $this->setCache('applied_key', '');
-        $this->setCache('applied_fragment', null);
-        $this->setCache('snapshot', null);
+        $snapshot = $this->sceneGet('snapshot', null);
+        $this->sceneSet(array('applied_key' => null, 'applied_fragment' => null, 'guard_at' => null, 'retry_at' => null));
         if ($_mode === 'keep') {
+            $this->sceneSet(array('snapshot' => null));
             return;
         }
         $fragment = ($_mode === 'off' || !is_array($snapshot) || empty($snapshot))
             ? array('on' => false) : self::restoreFragment($snapshot);
         try {
             $this->sendState($fragment);
-            $this->setCache('pending_restore', null);
+            $this->sceneSet(array('snapshot' => null, 'pending_restore' => null, 'restore_at' => null, 'restore_since' => null));
         } catch (Throwable $e) {
-            /* L'appareil ne répond pas : la restauration est retentée au
-             * prochain réveil, plutôt que de laisser l'alarme allumée. */
-            $this->setCache('pending_restore', $fragment);
-            $this->setCache('restore_at', time() + self::RESTORE_RETRY);
+            /* L'appareil ne répond pas : la restauration est retentée aux
+             * réveils suivants, plutôt que de laisser l'alarme allumée. La
+             * photographie est gardée pour une scène qui arriverait entre
+             * temps. */
+            $this->sceneSet(array('pending_restore' => $fragment, 'restore_at' => time() + self::RESTORE_RETRY,
+                                  'restore_since' => (int) $this->sceneGet('restore_since', time())));
             log::add(__CLASS__, 'warning', $this->getHumanName() . ' : ' . __('restauration impossible, nouvel essai dans', __FILE__) . ' ' . self::RESTORE_RETRY . ' s');
         }
     }
 
-    /* Arrête la scène affichée ($_all faux) ou toutes les scènes. */
+    /* Arrête la scène affichée ($_all faux) ou toutes les scènes, y compris
+     * celles programmées. */
     public function stopScenes($_all) {
         return $this->withLock(function () use ($_all) {
             $stack = $this->stack();
-            if (empty($stack)) {
-                return false;
-            }
-            $ended = null;
+            $top = self::topEntry($stack);
             if ($_all) {
-                $top = self::topEntry($stack);
-                $ended = $top !== null ? $top : end($stack);
+                if (empty($stack) && (string) $this->sceneGet('applied_key', '') === '') {
+                    return false;
+                }
+                $ended = $top !== null ? $top : array('end' => 'restore', 'name' => '');
                 /* « Tout arrêter » rend toujours l'éclairage d'avant. */
                 $ended['end'] = 'restore';
                 $stack = array();
             } else {
-                $top = self::topEntry($stack);
                 if ($top === null) {
                     return false;
                 }
@@ -1717,57 +2031,105 @@ class wledbe extends eqLogic {
             }
             log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . ($_all ? __('toutes les scènes arrêtées', __FILE__)
                 : sprintf(__('scène « %s » arrêtée', __FILE__), $ended['name'])));
-            $this->setCache('stack', $stack);
+            $this->sceneSet(array('stack' => $stack));
             $this->showTop($ended);
             return true;
         });
     }
 
+    /* Retire des piles les scènes supprimées de la bibliothèque. Une scène en
+     * cours d'essai, jamais enregistrée, n'y figure pas : on la laisse finir. */
+    public function purgeScenes($_ids) {
+        $this->withLock(function () use ($_ids) {
+            $stack = $this->stack();
+            $kept = array_values(array_filter($stack, function ($e) use ($_ids) { return !empty($e['test']) || isset($_ids[$e['scene']]); }));
+            if (count($kept) === count($stack)) {
+                return;
+            }
+            $this->sceneSet(array('stack' => $kept));
+            try {
+                $this->showTop(null);
+            } catch (Throwable $e) {
+                log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . $e->getMessage());
+            }
+        });
+    }
+
     /*
      * Une commande manuelle (allumer, couleur, effet…) pendant une scène :
-     * l'utilisateur reprend la main. Les scènes sont abandonnées sans rien
-     * restaurer — éteindre la lampe pendant la sonnette doit la laisser
-     * éteinte.
+     * l'utilisateur reprend la main. Les scènes affichées ou recouvertes sont
+     * abandonnées sans rien restaurer — éteindre la lampe pendant la sonnette
+     * doit la laisser éteinte — et une restauration en souffrance aussi. Les
+     * scènes programmées pour plus tard restent prévues.
      */
     private function abandonScenes() {
         $this->withLock(function () {
-            if (empty($this->stack()) && (string) $this->getCache('applied_key', '') === '') {
+            $stack = $this->stack();
+            $pending = $this->sceneGet('pending_restore', null);
+            if (!self::hasActive($stack) && (string) $this->sceneGet('applied_key', '') === '' && empty($pending)) {
                 return;
             }
             log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . __('commande manuelle, scènes abandonnées', __FILE__));
-            $this->setCache('stack', array());
-            $this->setCache('applied_key', '');
-            $this->setCache('applied_fragment', null);
-            $this->setCache('snapshot', null);
-            $this->setCache('pending_restore', null);
+            $later = array_values(array_filter($stack, function ($e) { return empty($e['active']); }));
+            $this->sceneSet(array('stack' => $later, 'applied_key' => null, 'applied_fragment' => null, 'snapshot' => null,
+                                  'pending_restore' => null, 'restore_at' => null, 'restore_since' => null,
+                                  'guard_at' => null, 'retry_at' => null));
             $this->publishScene();
             self::notifyDaemon();
         });
     }
 
-    /* Réveil par le démon (ou le cron) : avance la pile, retente une
-     * restauration en souffrance, et monte la garde. */
+    /*
+     * Réveil par le démon (ou le cron) : avance la pile, retente ce qui a
+     * échoué, et monte la garde. Si un autre processus tient déjà le verrou
+     * (un scénario qui lance une scène sur un WLED lent), on n'attend pas : il
+     * a la main, et le prochain réveil viendra.
+     */
     public function tick() {
         return $this->withLock(function () {
             $now = time();
-            $pending = $this->getCache('pending_restore', null);
-            if (is_array($pending) && !empty($pending) && empty($this->stack()) && (int) $this->getCache('restore_at', 0) <= $now) {
+            $stack = $this->stack();
+
+            /* Restauration en souffrance, s'il n'y a plus rien d'affiché. */
+            $pending = $this->sceneGet('pending_restore', null);
+            if (is_array($pending) && !empty($pending) && !self::hasActive($stack)
+                && (int) $this->sceneGet('restore_at', 0) <= $now) {
                 try {
                     $this->sendState($pending);
-                    $this->setCache('pending_restore', null);
+                    $this->sceneSet(array('snapshot' => null, 'pending_restore' => null, 'restore_at' => null, 'restore_since' => null));
                     log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . __('éclairage restauré', __FILE__));
                 } catch (Throwable $e) {
-                    $this->setCache('restore_at', $now + self::RESTORE_RETRY);
+                    if ($now - (int) $this->sceneGet('restore_since', $now) > self::RESTORE_GIVE_UP) {
+                        $this->sceneSet(array('snapshot' => null, 'pending_restore' => null, 'restore_at' => null, 'restore_since' => null));
+                        $text = __('éclairage non restauré : le WLED ne répond plus depuis trop longtemps.', __FILE__);
+                        log::add(__CLASS__, 'warning', $this->getHumanName() . ' : ' . $text);
+                        message::add(__CLASS__, $this->getHumanName() . ' : ' . $text, '', 'restore' . $this->getId());
+                    } else {
+                        $this->sceneSet(array('restore_at' => $now + self::RESTORE_RETRY));
+                    }
                 }
             }
-            $this->activateDue($now);
+
+            try {
+                $this->activateDue($now);
+                /* Une scène qui n'a pas pu être affichée (appareil muet) est
+                 * réessayée. */
+                $top = self::topEntry($this->stack());
+                if ($top !== null && $top['key'] !== (string) $this->sceneGet('applied_key', '')
+                    && (int) $this->sceneGet('retry_at', 0) <= $now) {
+                    $this->showTop(null);
+                }
+            } catch (Throwable $e) {
+                log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . $e->getMessage());
+            }
 
             /* La garde : une scène protégée qui a été défaite (bouton de
              * l'appareil, redémarrage, autre système) est réimposée. */
             $top = self::topEntry($this->stack());
-            $fragment = $this->getCache('applied_fragment', null);
-            if ($top !== null && !empty($top['guard']) && is_array($fragment) && (int) $this->getCache('guard_at', 0) <= $now) {
-                $this->setCache('guard_at', $now + self::GUARD_EVERY);
+            $fragment = $this->sceneGet('applied_fragment', null);
+            if ($top !== null && !empty($top['guard']) && $top['key'] === (string) $this->sceneGet('applied_key', '')
+                && is_array($fragment) && (int) $this->sceneGet('guard_at', 0) <= $now) {
+                $this->sceneSet(array('guard_at' => $now + self::GUARD_EVERY));
                 try {
                     $diff = self::mismatches($fragment, $this->call('GET', '/json/state'));
                     if (!empty($diff)) {
@@ -1780,26 +2142,33 @@ class wledbe extends eqLogic {
                 self::notifyDaemon();
             }
             return true;
-        });
+        }, false);
     }
 
-    /* Prochain instant où tick() a quelque chose à faire, ou null. */
+    /* Prochain instant où tick() a quelque chose à faire, ou null. Chaque
+     * cas porte sa propre échéance, toujours repoussée après un essai : un
+     * réveil ne reste jamais dans le passé. */
     public function nextWake() {
+        $stack = $this->stack();
+        $now = time();
         $times = array();
-        foreach ($this->stack() as $entry) {
+        foreach ($stack as $entry) {
             if (empty($entry['active'])) {
                 $times[] = (int) $entry['start_at'];
             } elseif ((int) $entry['until'] > 0) {
                 $times[] = (int) $entry['until'];
             }
         }
-        $top = self::topEntry($this->stack());
-        if ($top !== null && !empty($top['guard'])) {
-            $times[] = max(time(), (int) $this->getCache('guard_at', 0));
+        $top = self::topEntry($stack);
+        $applied = (string) $this->sceneGet('applied_key', '');
+        if ($top !== null && $top['key'] !== $applied) {
+            $times[] = (int) $this->sceneGet('retry_at', $now);
+        } elseif ($top !== null && !empty($top['guard'])) {
+            $times[] = (int) $this->sceneGet('guard_at', $now);
         }
-        $pending = $this->getCache('pending_restore', null);
-        if (is_array($pending) && !empty($pending)) {
-            $times[] = (int) $this->getCache('restore_at', 0);
+        $pending = $this->sceneGet('pending_restore', null);
+        if (is_array($pending) && !empty($pending) && !self::hasActive($stack)) {
+            $times[] = (int) $this->sceneGet('restore_at', $now);
         }
         return empty($times) ? null : min($times);
     }
@@ -1949,13 +2318,15 @@ class wledbe extends eqLogic {
         $this->addCmdIfMissing('intensity_set', 'Régler l\'intensité', 'action', 'slider', array(
             'order' => 108, 'isVisible' => 1, 'value' => $intensity, 'min' => 0, 'max' => 255));
         $this->addCmdIfMissing('preset_set', 'Appliquer un preset', 'action', 'select', array('order' => 109, 'value' => $preset));
-        $this->addCmdIfMissing('json_set', 'Envoyer un état JSON', 'action', 'message', array('order' => 110));
+        $this->addCmdIfMissing('json_set', 'Envoyer un état JSON', 'action', 'message', array('order' => 110,
+            'display' => array('title_disable' => 1, 'message_placeholder' => '{"on":true,"seg":{"fx":1}}')));
         $this->addCmdIfMissing('refresh', 'Rafraîchir', 'action', 'other', array('order' => 120, 'isVisible' => 1));
 
         $this->addCmdIfMissing('scene', 'Scène en cours', 'info', 'string', array('order' => 20, 'isVisible' => 1));
         $this->addCmdIfMissing('scene_active', 'Scène active', 'info', 'binary', array('order' => 21));
         $this->addCmdIfMissing('scene_until', 'Fin de la scène', 'info', 'string', array('order' => 22));
-        $this->addCmdIfMissing('scene_start', 'Lancer une scène', 'action', 'message', array('order' => 200));
+        $this->addCmdIfMissing('scene_start', 'Lancer une scène', 'action', 'message', array('order' => 200,
+            'display' => array('title_placeholder' => __('Nom de la scène', __FILE__), 'message_placeholder' => 'durée=30 délai=10 priorité=90')));
         $this->addCmdIfMissing('scene_stop', 'Arrêter la scène en cours', 'action', 'other', array('order' => 201));
         $this->addCmdIfMissing('scene_stop_all', 'Arrêter toutes les scènes', 'action', 'other', array('order' => 202, 'isVisible' => 1));
         $this->syncSceneCommands(self::scenes());
@@ -1977,14 +2348,25 @@ class wledbe extends eqLogic {
             $name = cleanComponanteName(__('Scène', __FILE__) . ' ' . $scene['name']);
             $cmd = $this->getCmd('action', $logicalId);
             if (!is_object($cmd)) {
-                $this->addCmdIfMissing($logicalId, $name, 'action', 'other', array('order' => 300 + $rank));
+                $cmd = $this->addCmdIfMissing($logicalId, $name, 'action', 'other', array('order' => 300 + $rank));
+                $cmd->setConfiguration('sceneName', $scene['name']);
+                $cmd->save();
                 continue;
             }
-            $other = cmd::byEqLogicIdCmdName($this->getId(), $name);
-            if ($cmd->getName() !== $name && (!is_object($other) || $other->getId() == $cmd->getId())) {
-                $cmd->setName($name);
-                $cmd->save();
+            /* Renommée seulement si la scène l'a été, et si l'utilisateur
+             * n'a pas donné à la commande un nom à lui. */
+            $previous = (string) $cmd->getConfiguration('sceneName', '');
+            if ($previous === $scene['name']) {
+                continue;
             }
+            $previousName = cleanComponanteName(__('Scène', __FILE__) . ' ' . $previous);
+            $other = cmd::byEqLogicIdCmdName($this->getId(), $name);
+            if (($previous === '' || $cmd->getName() === $previousName)
+                && (!is_object($other) || $other->getId() == $cmd->getId())) {
+                $cmd->setName($name);
+            }
+            $cmd->setConfiguration('sceneName', $scene['name']);
+            $cmd->save();
         }
         foreach ($this->getCmd('action') as $cmd) {
             if (strpos($cmd->getLogicalId(), 'scene::') === 0 && !isset($wanted[$cmd->getLogicalId()])) {
@@ -1996,6 +2378,18 @@ class wledbe extends eqLogic {
     private function addCmdIfMissing($_logicalId, $_name, $_type, $_subType, $_options = array()) {
         $cmd = $this->getCmd($_type, $_logicalId);
         if (is_object($cmd)) {
+            /* Les indications d'affichage arrivées avec une version plus
+             * récente sont ajoutées, sans toucher à celles déjà réglées. */
+            $changed = false;
+            foreach (isset($_options['display']) ? $_options['display'] : array() as $key => $value) {
+                if ($cmd->getDisplay($key, '') === '') {
+                    $cmd->setDisplay($key, $value);
+                    $changed = true;
+                }
+            }
+            if ($changed) {
+                $cmd->save();
+            }
             return $cmd;
         }
         $cmd = new wledbeCmd();
@@ -2020,6 +2414,9 @@ class wledbe extends eqLogic {
         if (isset($_options['max']))        { $cmd->setConfiguration('maxValue', $_options['max']); }
         if (isset($_options['value']) && is_object($_options['value'])) {
             $cmd->setValue($_options['value']->getId());
+        }
+        foreach (isset($_options['display']) ? $_options['display'] : array() as $key => $value) {
+            $cmd->setDisplay($key, $value);
         }
         $cmd->save();
         return $cmd;
@@ -2057,7 +2454,7 @@ class wledbe extends eqLogic {
 
     /* ==================================================== ÉCHECS ET ÉTAT */
 
-    private function noteFailure($_message) {
+    public function noteFailure($_message) {
         $failures = (int) $this->getCache('failures', 0) + 1;
         $this->setCache('failures', $failures);
         $this->setCache('problem', $_message);
@@ -2091,8 +2488,8 @@ class wledbe extends eqLogic {
             'presets'   => count((array) $this->getCache('preset_names', array())),
             'raw'       => $this->getCache('raw', array()),
             'stack'     => $this->stack(),
-            'applied'   => (string) $this->getCache('applied_key', ''),
-            'snapshot'  => is_array($this->getCache('snapshot', null)),
+            'applied'   => (string) $this->sceneGet('applied_key', ''),
+            'pending'   => is_array($this->sceneGet('pending_restore', null)),
         );
     }
 }
@@ -2100,6 +2497,14 @@ class wledbe extends eqLogic {
 /* Obligatoire même réduite : sans elle, le coeur refuse de créer ou d'ouvrir
  * un équipement du plugin. */
 class wledbeCmd extends cmd {
+
+    /* Les commandes « Scène … » appartiennent à la bibliothèque : seule
+     * syncSceneCommands() les crée et les retire. Une page d'équipement
+     * ouverte avant un enregistrement des scènes ne doit pas les effacer en
+     * sauvegardant. */
+    public function dontRemoveCmd() {
+        return strpos((string) $this->getLogicalId(), 'scene::') === 0;
+    }
 
     public function execute($_options = array()) {
         if ($this->getType() !== 'action') {
@@ -2111,4 +2516,9 @@ class wledbeCmd extends cmd {
         }
         $eqLogic->runAction($this->getLogicalId(), $_options);
     }
+}
+
+/* Une scène injouable sur cet appareil (effet ou palette absents, scène
+ * supprimée) : à distinguer d'un appareil muet, qu'on réessaie. */
+class wledbeSceneError extends Exception {
 }

@@ -25,10 +25,16 @@ Plugins → Objets connectés → WLED.
 Cochez les appareils à créer. Un appareil déjà connu n'est pas dédoublé : s'il a
 changé d'adresse, l'équipement existant est simplement mis à jour.
 
-Les équipements sont reconnus par leur **adresse MAC**. Réserver l'IP dans le
-routeur reste conseillé, mais une adresse qui change est retrouvée toute seule :
-une fois par heure, et dès qu'un appareil ne répond plus, le plugin écoute les
-annonces mDNS et corrige l'IP.
+Les équipements sont reconnus par leur **adresse MAC**. Si un autre WLED répond
+un jour à l'adresse d'un équipement (IP réattribuée par le routeur), le plugin
+le voit et n'en tient pas compte : l'équipement passe hors ligne au lieu de
+piloter le mauvais appareil.
+
+Réserver l'IP dans le routeur reste conseillé. À défaut, une adresse qui change
+est retrouvée par l'écoute mDNS horaire (si « Surveiller le réseau » est coché,
+et de toute façon pour un appareil qui ne répond plus depuis trois relevés).
+Cette écoute ne traverse ni Docker ni les VLAN : dans ces installations,
+relancez « Rechercher des WLED » après un changement d'adresse.
 
 ## La page de l'équipement
 
@@ -143,19 +149,31 @@ Pour chaque scène :
 
 - **Priorité** (0 à 100) : une scène plus prioritaire recouvre les autres.
 - **Durée** en secondes ; 0 pour une scène sans fin, qui dure jusqu'à
-  « Arrêter ».
+  « Arrêter la scène en cours » ou « Arrêter toutes les scènes ».
 - **Ensuite** : rendre l'éclairage d'avant, éteindre, ou laisser la scène.
 - **Sous garde** : la scène est relue toutes les dix secondes et réimposée si
   quelqu'un l'a défaite (bouton de l'appareil, redémarrage, autre système).
 - **Recettes** : une pour les bandes et, facultativement, une pour les
   matrices. Effet et palette se choisissent par leur nom, parmi ceux de vos
   WLED ; trois couleurs, luminosité, vitesse, intensité. Sur une matrice, le
-  **texte défilant** s'affiche avec l'effet « Scrolling Text ». Le **JSON
+  **texte défilant** s'affiche avec l'effet « Scrolling Text » ; WLED le limite
+  à 32 caractères (moins avec des accents). Le **JSON
   avancé** complète l'ordre pour tout le reste, par exemple
   `{"seg":{"c1":200}}` ou `{"lor":1}` pour passer outre un flux temps réel.
 
-**Essayer** enregistre la bibliothèque et joue la scène sur le WLED choisi,
-pendant la durée indiquée ; **Arrêter l'essai** rend l'éclairage.
+**Essayer** joue la scène telle qu'elle est à l'écran, sur le WLED choisi et
+pendant la durée indiquée, **sans rien enregistrer**. **Arrêter les scènes de
+cet appareil** arrête toutes ses scènes, y compris une vraie alarme en cours,
+et rend l'éclairage.
+
+Rien n'est enregistré avant **Enregistrer les scènes** ; Jeedom prévient si
+l'on quitte la page avec des modifications en attente. Supprimer une scène
+supprime, à l'enregistrement, sa commande « Scène … » sur tous les équipements :
+un scénario qui l'appelait est à revoir. Une bibliothèque entièrement vidée
+reste vide ; **Scènes d'origine** remet celles livrées avec le plugin.
+
+Une commande « Scène … » renommée à la main garde son nom, même si la scène
+est renommée ensuite.
 
 Les effets sont désignés par leur nom et retrouvés sur chaque appareil au
 moment de jouer : la même scène marche sur un WLED 0.14 et sur un 16.0. Si
@@ -201,8 +219,17 @@ termine, l'éclairage d'avant la **première** revient.
 Relancer une scène déjà en cours la prolonge : sa durée repart de zéro.
 
 Une **commande manuelle** (allumer, éteindre, couleur, effet…) pendant une
-scène abandonne toutes les scènes sans rien restaurer : l'utilisateur a repris
-la main, éteindre la lampe pendant la sonnette doit la laisser éteinte.
+scène abandonne les scènes en cours sans rien restaurer : l'utilisateur a repris
+la main, éteindre la lampe pendant la sonnette doit la laisser éteinte. Les
+scènes programmées pour plus tard restent prévues.
+
+Une scène déjà lancée n'est pas modifiée si l'on change la bibliothèque : elle
+finit avec les réglages qu'elle avait au départ. Une scène supprimée de la
+bibliothèque est en revanche retirée des piles.
+
+Si une scène ne peut pas être jouée sur un appareil (effet absent de sa version
+de WLED, par exemple), elle est retirée de sa pile, la scène suivante reprend,
+et un message le signale.
 
 L'onglet **Diagnostic** de l'équipement montre la pile : scène affichée,
 scènes recouvertes, scènes programmées.
@@ -210,12 +237,17 @@ scènes recouvertes, scènes programmées.
 ### Le démon
 
 Le démon du plugin réveille les scènes à la seconde près : fin de durée,
-départ différé, garde. Il ne parle jamais aux WLED lui-même. S'il est arrêté,
-le cron de Jeedom prend le relais, une fois par minute : une scène ne reste
-jamais allumée faute de démon, elle s'arrête simplement moins précisément.
+départ différé, garde. Il ne parle jamais aux WLED lui-même, et réveille les
+appareils en parallèle : un WLED muet ne retarde pas les autres. S'il est
+arrêté, ou s'il ne joint plus Jeedom (clé API régénérée, accès API du plugin
+restreint), le cron de Jeedom prend le relais, une fois par minute, et la
+gestion automatique des démons le relance : une scène ne reste jamais allumée
+faute de démon, elle s'arrête simplement moins précisément.
 
 Si un WLED ne répond pas au moment de rendre l'éclairage, la restauration est
-retentée toutes les 30 secondes.
+retentée toutes les 30 secondes pendant une demi-heure, puis abandonnée avec
+un message : une restauration très tardive écraserait ce qui a été fait depuis.
+Une commande manuelle l'annule aussi.
 
 ## Configuration du plugin
 

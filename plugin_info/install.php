@@ -27,7 +27,6 @@ function wledbe_install() {
  * prochain relevé ; on ne fait que rattraper les commandes. */
 function wledbe_update() {
     try {
-        config::save('api::wledbe::mode', 'localhost', 'core');
         wledbe::rebuildCommands();
     } catch (Throwable $e) {
         log::add('wledbe', 'error', __('Mise à jour du plugin :', __FILE__) . ' ' . $e->getMessage());

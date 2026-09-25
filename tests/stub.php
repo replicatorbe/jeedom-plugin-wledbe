@@ -33,6 +33,17 @@ class config {
     }
 }
 
+/* Le cache du coeur, en mémoire : l'état des scènes y vit sous sa propre
+ * clé. */
+class cache {
+    public static $store = array();
+    private $value;
+    public function __construct($_value) { $this->value = $_value; }
+    public static function byKey($_key) { return new cache(isset(self::$store[$_key]) ? self::$store[$_key] : null); }
+    public static function set($_key, $_value, $_lifetime = 0) { self::$store[$_key] = $_value; }
+    public function getValue($_default = '') { return ($this->value === null || $this->value === '') ? $_default : $this->value; }
+}
+
 /* Dossier temporaire du plugin : verrous de la pile et fichier témoin du
  * démon. */
 class jeedom {
@@ -81,6 +92,11 @@ class cmd {
     public $value = '';
     public $configuration = array();
     public $template = array();
+    public $display = array();
+    public function getDisplay($_key, $_default = '') {
+        return isset($this->display[$_key]) ? $this->display[$_key] : $_default;
+    }
+    public function setDisplay($_key, $_value) { $this->display[$_key] = $_value; return $this; }
 
     public static function reset() { self::$table = array(); self::$saves = 0; }
 
@@ -209,6 +225,8 @@ class eqLogic {
     public function setName($_v) {}
     public function setEqType_name($_v) {}
     public function save($_direct = false) { $this->saved++; }
+    /* Relit l'équipement en base : rien à relire ici. */
+    public function refresh() {}
     public static function byType($_type, $_onlyEnable = false) { return array(); }
     public static function byLogicalId($_logicalId, $_eqType, $_multiple = false) { return null; }
 }

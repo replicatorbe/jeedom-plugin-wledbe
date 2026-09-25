@@ -56,16 +56,24 @@ try {
         if (!is_array($devices) || count($devices) === 0) {
             throw new Exception(__('Aucun appareil à créer.', __FILE__));
         }
-        $count = 0;
+        /* Un appareil qui échoue n'empêche pas les autres d'être créés : la
+         * page dit lesquels, puis se recharge. */
+        $created = 0;
+        $errors = array();
         foreach ($devices as $device) {
-            if (is_array($device) && isset($device['ip'])) {
+            if (!is_array($device) || !isset($device['ip'])) {
+                continue;
+            }
+            try {
                 /* On ne croit pas le navigateur sur parole : l'appareil est
                  * réinterrogé avant d'être créé. */
                 wledbe::createFromProbe(wledbe::probe($device['ip']));
-                $count++;
+                $created++;
+            } catch (Throwable $e) {
+                $errors[] = $device['ip'] . ' : ' . $e->getMessage();
             }
         }
-        ajax::success($count);
+        ajax::success(array('created' => $created, 'errors' => $errors));
     }
 
     if (init('action') == 'refresh') {
@@ -90,7 +98,7 @@ try {
         $devices = array();
         $effects = array();
         $palettes = array();
-        foreach (wledbe::byType('wledbe') as $eqLogic) {
+        foreach (wledbe::byType('wledbe', true) as $eqLogic) {
             $devices[] = array('id' => $eqLogic->getId(), 'name' => $eqLogic->getHumanName(), 'matrix' => $eqLogic->isMatrix());
             foreach ((array) $eqLogic->getCache('fx_names', array()) as $name) {
                 if ($name !== 'RSVD' && $name !== '-') {
@@ -119,12 +127,17 @@ try {
         ajax::success(wledbe::saveScenes(wledbe::DEFAULT_SCENES));
     }
 
-    /* Joue une scène enregistrée, le temps d'un essai. */
+    /* Joue une scène telle qu'elle est à l'écran, sans l'enregistrer, le
+     * temps d'un essai. */
     if (init('action') == 'testScene') {
         unautorizedInDemo();
         $eqLogic = wledbeEq();
-        $duration = max(1, min(600, (int) init('duration', 10)));
-        ajax::success($eqLogic->startScene(init('scene'), array('duration' => $duration, 'priority' => 100)));
+        $scene = json_decode(init('scene'), true);
+        if (!is_array($scene)) {
+            throw new Exception(__('Scène illisible.', __FILE__));
+        }
+        $duration = is_numeric(init('duration')) ? max(1, min(600, (int) init('duration'))) : 10;
+        ajax::success($eqLogic->playScene($scene, array('duration' => $duration, 'priority' => 100, 'test' => true)));
     }
 
     if (init('action') == 'stopScenes') {

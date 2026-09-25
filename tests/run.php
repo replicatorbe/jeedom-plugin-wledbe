@@ -41,6 +41,21 @@ function section($_title) {
     echo "\n" . $_title . "\n" . str_repeat('-', mb_strlen($_title)) . "\n";
 }
 
+/* L'état des scènes d'un équipement, lu et écrit comme le ferait le cache du
+ * coeur : pour vieillir une entrée plutôt que d'attendre. */
+function sceneSetT($_eq, $_values) {
+    $key = 'wledbe::scene::' . $_eq->getId();
+    $state = isset(cache::$store[$key]) ? cache::$store[$key] : array();
+    foreach ($_values as $k => $v) {
+        if ($v === null) { unset($state[$k]); } else { $state[$k] = $v; }
+    }
+    cache::$store[$key] = $state;
+}
+function sceneGetT($_eq, $_key) {
+    $state = $_eq->sceneState();
+    return isset($state[$_key]) ? $state[$_key] : null;
+}
+
 function fixture($_name) {
     return json_decode(file_get_contents(__DIR__ . '/fixtures/' . $_name), true);
 }
@@ -353,7 +368,7 @@ $strip->startScene('sonnette', array('duration' => 10));
 check('réveil prévu à la fin de la sonnette', $strip->nextWake() - time() <= 10, true);
 $stack = $strip->stack();
 $stack[0]['until'] = time() - 1;
-$strip->setCache('stack', $stack);
+sceneSetT($strip, array('stack' => $stack));
 $strip->tick();
 check('durée écoulée : scène retirée', count($strip->stack()), 0);
 check('durée écoulée : éclairage rendu', $strip->state['seg'][0]['fx'], 0);
@@ -364,7 +379,7 @@ check('scène programmée : rien d\'affiché', $strip->state['seg'][0]['fx'], 0)
 check('réveil à l\'heure de départ', abs($strip->nextWake() - (time() + 60)) <= 1, true);
 $stack = $strip->stack();
 $stack[0]['start_at'] = time() - 1;
-$strip->setCache('stack', $stack);
+sceneSetT($strip, array('stack' => $stack));
 $strip->tick();
 check('heure venue : scène lancée', $strip->state['seg'][0]['fx'], 37);
 $strip->stopScenes(true);
@@ -375,7 +390,7 @@ $strip->startScene('alarme', array('duration' => 0));
 check('alarme affichée', $strip->state['seg'][0]['fx'], array_search('Strobe Mega', $eff, true));
 check('sous garde : réveil prévu', $strip->nextWake() !== null, true);
 $strip->state['on'] = false;
-$strip->setCache('guard_at', time() - 1);
+sceneSetT($strip, array('guard_at' => time() - 1));
 $strip->tick();
 check('alarme éteinte par quelqu\'un : rallumée par la garde', $strip->state['on'], true);
 
@@ -389,12 +404,12 @@ $strip->state = $original;
 $strip->startScene('sonnette', array('duration' => 0));
 $strip->down = 20;
 $strip->stopScenes(false);
-check('WLED muet à la fin : restauration en attente', is_array($strip->getCache('pending_restore', null)), true);
+check('WLED muet à la fin : restauration en attente', is_array(sceneGetT($strip, 'pending_restore')), true);
 $strip->down = 0;
-$strip->setCache('restore_at', time() - 1);
+sceneSetT($strip, array('restore_at' => time() - 1));
 $strip->tick();
 check('restauration retentée au réveil suivant', $strip->state['seg'][0]['fx'], 0);
-check('plus rien en attente', $strip->getCache('pending_restore', null), null);
+check('plus rien en attente', sceneGetT($strip, 'pending_restore'), null);
 
 /* Commandes de scène. */
 $sceneCmds = array_filter($strip->getCmd('action'), function ($c) { return strpos($c->logicalId, 'scene::') === 0; });
@@ -403,6 +418,185 @@ $strip->syncSceneCommands(array(wledbe::normalizeScene(array('id' => 'police', '
 $sceneCmds = array_values(array_filter($strip->getCmd('action'), function ($c) { return strpos($c->logicalId, 'scene::') === 0; }));
 check('scènes supprimées : commandes retirées', count($sceneCmds), 1);
 check('scène renommée : commande renommée', $sceneCmds[0]->name, 'Scène Gyrophare');
+
+
+/* ------------------------------------------------------------------------ */
+section('Relecture : restauration, pile et garde');
+
+/* Une nouvelle scène pendant une restauration en souffrance garde la
+ * photographie d'origine : à sa fin, c'est l'éclairage d'avant la police
+ * qui revient, pas la police. */
+$r = new wledbeFake();
+$r->id = 60;
+$r->configuration = array('ip' => '192.168.1.60', 'verify' => 1, 'layout' => 'strip');
+$r->setCache('fx_names', $eff);
+$r->state = $si['state'];
+$r->createCommands();
+$orig = $r->state;
+$r->startScene('police', array('duration' => 0));
+$r->down = 20;
+$r->stopScenes(false);
+$r->down = 0;
+check('restauration en souffrance', is_array(sceneGetT($r, 'pending_restore')), true);
+$r->startScene('sonnette', array('duration' => 0));
+$r->stopScenes(false);
+check('scène suivante finie : éclairage d\'avant la police', wledbe::mismatches(wledbe::restoreFragment($orig), $r->state), array());
+
+/* Une commande manuelle annule une restauration en souffrance. */
+$r->state = $orig;
+$r->startScene('police', array('duration' => 0));
+$r->down = 20;
+$r->stopScenes(false);
+$r->down = 0;
+$r->runAction('on_set', array());
+check('commande manuelle : restauration abandonnée', sceneGetT($r, 'pending_restore'), null);
+sceneSetT($r, array('restore_at' => time() - 1));
+$r->tick();
+check('et le réveil suivant ne défait pas la commande', $r->state['on'], true);
+
+/* Restauration en souffrance et scène programmée : le réveil ne reste pas
+ * dans le passé, et la restauration a lieu quand même. */
+$r->state = $orig;
+$r->startScene('police', array('duration' => 0));
+$r->down = 20;
+$r->stopScenes(false);
+$r->down = 0;
+$r->startScene('sonnette', array('delay' => 3600));
+sceneSetT($r, array('restore_at' => time() - 1));
+$r->tick();
+check('restauration faite malgré la scène programmée', sceneGetT($r, 'pending_restore'), null);
+check('réveil suivant : l\'heure de la scène programmée', abs($r->nextWake() - (time() + 3600)) <= 2, true);
+$r->stopScenes(true);
+
+/* Échec d'envoi à l'affichage : la scène n'est pas marquée affichée, et un
+ * réveil est prévu pour réessayer, dans le futur. */
+$r->state = $orig;
+$r->down = 20;
+$err = '';
+try { $r->startScene('police', array('duration' => 0)); } catch (Exception $e) { $err = $e->getMessage(); }
+$r->down = 0;
+check('WLED muet : erreur rendue au scénario', $err !== '', true);
+check('WLED muet : scène pas marquée affichée', (string) sceneGetT($r, 'applied_key'), '');
+check('WLED muet : nouvel essai prévu, pas dans le passé', $r->nextWake() > time(), true);
+sceneSetT($r, array('retry_at' => time() - 1));
+$r->tick();
+check('au réveil, la scène est affichée', $r->state['seg'][0]['fx'], 37);
+$r->stopScenes(true);
+
+/* Scène injouable (effet absent) sous garde : retirée, sans boucle. */
+$bad = wledbe::normalizeScene(array('id' => 'bad', 'name' => 'Cassée', 'guard' => 1, 'duration' => 0, 'strip' => array('effect' => 'Inexistant')));
+$err = '';
+try { $r->playScene($bad); } catch (Exception $e) { $err = $e->getMessage(); }
+check('scène injouable : erreur claire', strpos($err, 'inconnu sur ce WLED') !== false, true);
+check('scène injouable : retirée de la pile', count($r->stack()), 0);
+check('scène injouable : aucun réveil', $r->nextWake(), null);
+
+/* Scène injouable par-dessus une autre : la précédente revient. */
+$r->state = $orig;
+$r->startScene('sonnette', array('duration' => 0));
+try { $r->playScene(wledbe::normalizeScene(array('id' => 'bad', 'name' => 'Cassée', 'priority' => 99, 'strip' => array('effect' => 'Inexistant')))); } catch (Exception $e) {}
+check('scène injouable : la sonnette reste affichée', $r->state['seg'][0]['fx'], 1);
+$r->stopScenes(true);
+
+/* Scène supprimée de la bibliothèque pendant qu'elle attend sous une autre. */
+$r->state = $orig;
+$r->startScene('notification', array('duration' => 0));
+$r->startScene('police', array('duration' => 0));
+$r->purgeScenes(array('police' => 1));
+check('scène supprimée : retirée de la pile', array_column($r->stack(), 'key'), array('police'));
+$r->stopScenes(false);
+check('puis éclairage d\'avant', wledbe::mismatches(wledbe::restoreFragment($orig), $r->state), array());
+
+/* Relancer avec délai la scène affichée : l'appareil n'en reste pas figé. */
+$r->state = $orig;
+$r->startScene('police', array('duration' => 0));
+$r->startScene('police', array('delay' => 600));
+check('relance différée : éclairage rendu pendant l\'attente', $r->state['seg'][0]['fx'], 0);
+check('info « Scène en cours » vide pendant l\'attente', $r->published['scene'], '');
+$r->stopScenes(true);
+
+/* Commande manuelle : les scènes programmées restent prévues. */
+$r->state = $orig;
+$r->startScene('sonnette', array('delay' => 600));
+$r->startScene('police', array('duration' => 0));
+$r->runAction('off_set', array());
+check('commande manuelle : la scène programmée reste', array_column($r->stack(), 'key'), array('sonnette'));
+$r->stopScenes(true);
+
+/* Deux scènes qui finissent ensemble : le mode de fin de celle affichée. */
+$r->state = $orig;
+$r->startScene('notification', array('duration' => 10, 'end' => 'off'));
+$r->startScene('police', array('duration' => 10, 'end' => 'restore'));
+$st = $r->stack();
+foreach ($st as $i => $e) { $st[$i]['until'] = time() - 1; }
+sceneSetT($r, array('stack' => $st));
+$r->state['on'] = true;
+$r->tick();
+check('fin simultanée : restauration (mode de la police affichée)', wledbe::mismatches(wledbe::restoreFragment($orig), $r->state), array());
+
+/* Verrou : un appel imbriqué dans le même processus ne se bloque pas. */
+$m = new ReflectionMethod('wledbe', 'withLock');
+$m->setAccessible(true);
+$inner = $m->invoke($r, function () use ($m, $r) { return $m->invoke($r, function () { return 'imbriqué'; }); });
+check('verrou réentrant', $inner, 'imbriqué');
+
+/* ------------------------------------------------------------------------ */
+section('Relecture : vérification et options');
+
+check('« w~10 » est relatif', wledbe::isIdempotent(array('bri' => 'w~10')), false);
+check('« 1~5~ » est relatif', wledbe::isIdempotent(array('ps' => '1~5~')), false);
+check('segment bri 0 = segment éteint', wledbe::mismatches(array('seg' => array(array('id' => 0, 'bri' => 0))), array('seg' => array(array('id' => 0, 'on' => false, 'bri' => 255)))), array());
+check('sans segment sélectionné : le principal', wledbe::mismatches(array('seg' => array('fx' => 5)),
+    array('mainseg' => 1, 'seg' => array(array('id' => 0, 'fx' => 0), array('id' => 1, 'fx' => 5)))), array());
+check('couleur relue illisible : écart, pas d\'exception', count(wledbe::mismatches(array('seg' => array('col' => array(array(1, 2, 3)))), array('seg' => array(array('id' => 0, 'sel' => true, 'col' => array('zz')))))), 1);
+$diff = wledbe::mismatches(array('seg' => array('n' => 'x')), array('seg' => array(array('id' => 0, 'sel' => true, 'n' => '<img src=x>'))));
+check('valeur relue sans balisage dans le message', strpos($diff[0], '<') === false, true);
+check('« DURÉE=30 » en majuscules', wledbe::parseSceneOptions('DURÉE=30')['duration'], 30);
+check('« durée=5 min » avec une espace', wledbe::parseSceneOptions('durée=5 min')['duration'], 300);
+check('durée vidée dans l\'éditeur : valeur par défaut, pas « sans fin »', wledbe::normalizeScene(array('name' => 'x', 'duration' => ''))['duration'], 60);
+check('luminosité vidée : 100 %, pas 1 %', wledbe::normalizeScene(array('name' => 'x', 'strip' => array('brightness' => '')))['strip']['brightness'], 100);
+$long = wledbe::normalizeRecipe(array('text' => str_repeat('É', 20)), true)['text'];
+check('texte défilant coupé à 32 octets', strlen($long) <= 32, true);
+check('sur une frontière de caractère', mb_check_encoding($long, 'UTF-8'), true);
+check('nom de scène sans balisage', wledbe::normalizeScene(array('name' => '<b>Alarme</b>'))['name'], 'Alarme');
+
+config::save('scenes', '[]', 'wledbe');
+check('bibliothèque vidée : reste vide', wledbe::scenes(), array());
+config::save('scenes', '', 'wledbe');
+check('bibliothèque jamais touchée : scènes livrées', count(wledbe::scenes()), 6);
+
+/* ------------------------------------------------------------------------ */
+section('Relecture : identité et découverte');
+
+$id = new wledbeFake();
+$id->id = 70;
+$id->configuration = array('ip' => '192.168.1.70', 'mac' => 'aabbcc000070');
+$id->createCommands();
+$foreign = $si;
+$foreign['info']['mac'] = 'aabbcc999999';
+$foreign['info']['name'] = 'Intrus';
+$id->ingest($foreign);
+check('autre WLED à la même IP : identité gardée', $id->configuration['mac'] . ' / ' . ($id->configuration['device_name'] ?? ''), 'aabbcc000070 / ');
+check('autre WLED à la même IP : compté comme échec', (int) $id->getCache('failures', 0), 1);
+check('MAC d\'un équipement créé à la main : apprise au relevé', (function () use ($si) {
+    $e = new wledbeFake(); $e->id = 71; $e->configuration = array('ip' => '192.168.1.71');
+    $e->applyInfo(wledbe::describe($si['info'], '192.168.1.71'));
+    return $e->configuration['mac'];
+})(), 'aabbcc112233');
+$evil = $si['info'];
+$evil['name'] = '<img src=x onerror=alert(1)>Salon';
+check('nom d\'appareil sans balisage', wledbe::describe($evil, '1.2.3.4')['name'], 'Salon');
+check('sous-réseau /24', wledbe::subnetPrefix('192.168.20.0/24'), '192.168.20');
+check('sous-réseau sans masque', wledbe::subnetPrefix('10.0.5'), '10.0.5');
+$err = '';
+try { wledbe::subnetPrefix('10.0.0.0/16'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('/16 refusé, pas tronqué en silence', strpos($err, '/24') !== false, true);
+$err = '';
+try { wledbe::subnetPrefix('300.1.1'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('octet > 255 refusé', $err !== '', true);
+$sceneCmd = new wledbeCmd();
+$sceneCmd->logicalId = 'scene::police';
+check('commande de scène protégée de la sauvegarde de page', $sceneCmd->dontRemoveCmd(), true);
 
 /* ------------------------------------------------------------------------ */
 section('Commandes');

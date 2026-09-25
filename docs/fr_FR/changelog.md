@@ -1,5 +1,29 @@
 # Changelog — plugin WLED
 
+## 0.2.1 (beta)
+
+Relecture complète du code, corrections :
+
+- Sécurité : un WLED (ou un faux WLED) du réseau ne peut plus injecter de
+  balisage dans la page par son nom ou sa version ; la clé API du démon
+  n'apparaît plus dans la liste des processus.
+- Identité : un autre WLED qui répond à l'adresse d'un équipement n'en prend
+  plus l'identité ; la MAC d'un équipement créé à la main est apprise au
+  premier relevé ; la découverte vérifie l'appareil avant de déplacer un
+  équipement.
+- Scènes : restauration fiable après un appareil muet, même si une autre
+  scène arrive entre-temps ; plus de réveils en boucle ; une scène injouable
+  est retirée proprement ; une scène supprimée quitte les piles ; une commande
+  manuelle garde les scènes programmées ; texte défilant limité à 32 octets.
+- Démon : plus de journal inondé ni de boucle si Jeedom refuse l'accès, arrêt
+  et relance automatique ; réveils en parallèle ; prise en compte de deux
+  changements dans la même seconde.
+- Éditeur de scènes : « Essayer » n'enregistre plus rien, les saisies ne sont
+  plus perdues en repliant le panneau, un champ vidé garde sa valeur par
+  défaut, Jeedom prévient avant de quitter avec des modifications.
+- Relevé des appareils en parallèle ; découverte limitée aux vraies
+  interfaces réseau ; sous-réseau validé.
+
 ## 0.2 (beta)
 
 - Scènes : bibliothèque commune à tous les WLED, livrée avec alarme,

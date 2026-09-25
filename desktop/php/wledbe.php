@@ -40,7 +40,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 			<div class="alert alert-info" style="margin:5px;">
 				{{Une scène joue un effet pendant une durée donnée, avec une priorité, puis rend l'éclairage d'avant. Elle est commune à tous vos WLED ; chacun reçoit une commande « Scène … ». Dans un scénario, la commande « Lancer une scène » accepte le nom en titre et des options en message :}}
 				<code>durée=30</code> <code>durée=5m</code> <code>délai=10</code> <code>heure=22:30</code> <code>priorité=95</code> <code>fin=éteindre</code>.
-				{{Une scène plus prioritaire recouvre les autres ; une scène sous garde est réimposée si quelqu'un la défait. Une commande manuelle (allumer, couleur…) pendant une scène l'abandonne.}}
+				{{Une scène plus prioritaire recouvre les autres ; une scène sous garde est réimposée si quelqu'un la défait. Une commande manuelle (allumer, couleur…) pendant une scène l'abandonne. « Essayer » joue la scène telle qu'elle est à l'écran, sans l'enregistrer.}}
 			</div>
 			<div class="form-inline" style="margin:5px 5px 10px 5px;">
 				<a class="btn btn-success btn-sm" id="bt_wledbeScenesSave"><i class="fas fa-check-circle"></i> {{Enregistrer les scènes}}</a>
@@ -50,7 +50,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<select class="form-control input-sm" id="sel_wledbeTestDevice"></select>
 				<span>{{pendant}}</span>
 				<input type="number" class="form-control input-sm" id="in_wledbeTestDuration" value="10" min="1" max="600" style="width:70px;"> s
-				<a class="btn btn-default btn-sm" id="bt_wledbeTestStop"><i class="fas fa-stop"></i> {{Arrêter l'essai}}</a>
+				<a class="btn btn-default btn-sm" id="bt_wledbeTestStop" title="{{Arrête toutes les scènes de cet appareil, y compris une vraie alarme en cours, et rend l'éclairage d'avant.}}"><i class="fas fa-stop"></i> {{Arrêter les scènes de cet appareil}}</a>
 			</div>
 			<div id="div_wledbeSceneList"></div>
 			<datalist id="dl_wledbeEffects"></datalist>
@@ -191,35 +191,35 @@ $eqLogics = eqLogic::byType($plugin->getId());
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Nom dans WLED}}</label>
 								<div class="col-sm-9">
-									<span class="eqLogicAttr" data-l1key="configuration" data-l2key="device_name"></span>
+									<span id="span_wledbeDeviceName"></span>
 								</div>
 							</div>
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Type}}</label>
 								<div class="col-sm-9">
 									<span id="span_wledbeLayout" class="label label-info"></span>
-									<span class="eqLogicAttr" data-l1key="configuration" data-l2key="leds" style="margin-left:6px;"></span> {{LED}}
+									<span id="span_wledbeLeds" style="margin-left:6px;"></span>
 									<span id="span_wledbeRgbw" class="label label-default" style="margin-left:6px;display:none;">RGBW</span>
 								</div>
 							</div>
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Adresse MAC}}</label>
 								<div class="col-sm-9">
-									<span class="eqLogicAttr" data-l1key="configuration" data-l2key="mac"></span>
+									<span id="span_wledbeMac"></span>
 								</div>
 							</div>
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Version}}</label>
 								<div class="col-sm-9">
-									<span class="eqLogicAttr" data-l1key="configuration" data-l2key="version"></span>
-									<span class="eqLogicAttr label label-default" data-l1key="configuration" data-l2key="arch" style="margin-left:6px;"></span>
+									<span id="span_wledbeVersion"></span>
+									<span id="span_wledbeArch" class="label label-default" style="margin-left:6px;"></span>
 								</div>
 							</div>
 							<div class="form-group">
 								<label class="col-sm-3 control-label"></label>
 								<div class="col-sm-9">
 									<a class="btn btn-default btn-sm" id="bt_wledbeRefresh"><i class="fas fa-sync"></i> {{Relever maintenant}}</a>
-									<a class="btn btn-default btn-sm" id="bt_wledbeLists"><i class="fas fa-list"></i> {{Relire effets et presets}}</a>
+									<a class="btn btn-default btn-sm" id="bt_wledbeLists"><i class="fas fa-list"></i> {{Relire effets, palettes et presets}}</a>
 									<a class="btn btn-default btn-sm" id="bt_wledbeOpen" target="_blank"><i class="fas fa-external-link-alt"></i> {{Interface WLED}}</a>
 									<br>
 									<span id="span_wledbeStatus" style="display:inline-block;margin-top:6px;"></span>

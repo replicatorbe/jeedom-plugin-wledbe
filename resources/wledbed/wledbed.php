@@ -29,15 +29,15 @@
  * Il ne charge pas core.inc.php : PHP en ligne de commande et l'extension
  * curl, déjà exigée par Jeedom, suffisent.
  *
- *   php wledbed.php --callback URL --pid FICHIER --stamp FICHIER --loglevel debug --timezone Europe/Brussels
+ *   php wledbed.php --callback URL --pid FICHIER --stamp FICHIER --keyfile FICHIER --loglevel debug --timezone Europe/Brussels
  *
- * La clé API arrive par l'entrée standard, jamais en argument : ps est
- * lisible par tous les utilisateurs de la machine.
+ * La clé API arrive dans un fichier que le démon efface aussitôt lu, jamais
+ * en argument : ps est lisible par tous les utilisateurs de la machine.
  */
 
 error_reporting(E_ALL);
 set_time_limit(0);
-$options = getopt('', array('callback:', 'pid:', 'stamp:', 'loglevel:', 'timezone:'));
+$options = getopt('', array('callback:', 'pid:', 'stamp:', 'keyfile:', 'loglevel:', 'timezone:'));
 /* Le PHP en ligne de commande est souvent en UTC quand Jeedom est à l'heure
  * locale : sans le fuseau du plugin, le journal du démon serait décalé. */
 if (!empty($options['timezone']) && in_array($options['timezone'], timezone_identifiers_list(), true)) {
@@ -47,9 +47,15 @@ $callback = isset($options['callback']) ? $options['callback'] : '';
 $pidFile  = isset($options['pid']) ? $options['pid'] : '';
 $stamp    = isset($options['stamp']) ? $options['stamp'] : '';
 $logLevel = isset($options['loglevel']) ? $options['loglevel'] : 'error';
-$apiKey   = trim((string) fgets(STDIN));
+$apiKey   = '';
+if (!empty($options['keyfile']) && is_readable($options['keyfile'])) {
+    $apiKey = trim((string) file_get_contents($options['keyfile']));
+    @unlink($options['keyfile']);
+}
 
-$levels = array('debug' => 0, 'info' => 1, 'warning' => 2, 'error' => 3, 'none' => 4);
+/* Tous les niveaux que log::convertLogLevel() du coeur peut rendre. */
+$levels = array('debug' => 0, 'info' => 1, 'notice' => 1, 'warning' => 2, 'error' => 3,
+                'critical' => 3, 'alert' => 3, 'emergency' => 3, 'none' => 4);
 $threshold = isset($levels[$logLevel]) ? $levels[$logLevel] : 3;
 
 function wlLog($_level, $_message) {
@@ -61,7 +67,7 @@ function wlLog($_level, $_message) {
 }
 
 if ($callback === '' || $pidFile === '' || $apiKey === '') {
-    wlLog('error', 'Arguments manquants : --callback, --pid et la clé API sur l\'entrée standard sont obligatoires.');
+    wlLog('error', 'Arguments manquants : --callback, --pid et --keyfile (contenant la clé API) sont obligatoires.');
     exit(1);
 }
 if (!function_exists('curl_init')) {
@@ -79,9 +85,14 @@ if (function_exists('pcntl_async_signals')) {
     pcntl_signal(SIGINT, $stop);
 }
 
-/* Appel au plugin. Un tick peut durer : il envoie des ordres vérifiés, avec
- * leurs relances, à un WLED parfois lent. */
-function wlCallback($_query) {
+/* Horloge monotone, pour les intervalles : un recalage NTP en arrière ne
+ * doit pas figer le démon. L'heure murale ne sert qu'à comparer aux
+ * échéances du planning. */
+function wlClock() {
+    return hrtime(true) / 1e9;
+}
+
+function wlHandle($_query) {
     global $callback, $apiKey;
     $url = $callback . (strpos($callback, '?') === false ? '?' : '&')
          . 'apikey=' . rawurlencode($apiKey) . '&' . $_query;
@@ -89,88 +100,134 @@ function wlCallback($_query) {
     curl_setopt_array($ch, array(
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_CONNECTTIMEOUT => 5,
-        CURLOPT_TIMEOUT        => 60,
+        /* Un réveil peut durer : il envoie des ordres vérifiés, avec leurs
+         * relances, à un WLED parfois lent. */
+        CURLOPT_TIMEOUT        => 120,
         CURLOPT_PROXY          => '',
         /* Le callback est en boucle locale, parfois derrière un certificat
          * auto-signé si l'accès interne est en https. */
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => 0,
     ));
+    return $ch;
+}
+
+/* Jeedom refuse la clé (clé régénérée, accès API restreint) : inutile
+ * d'insister, le démon s'arrête. La gestion automatique du coeur le relance
+ * avec la clé du moment. */
+function wlRefused($_code) {
+    if ($_code === 401 || $_code === 403) {
+        wlLog('error', 'Jeedom refuse l\'accès (HTTP ' . $_code . ') : clé API changée ou accès API du plugin restreint. Arrêt du démon.');
+        global $pidFile;
+        @unlink($pidFile);
+        exit(1);
+    }
+}
+
+function wlSchedule() {
+    $ch = wlHandle('action=schedule');
     $answer = curl_exec($ch);
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $error = curl_error($ch);
     curl_close($ch);
+    wlRefused($code);
     if ($answer === false || $code !== 200) {
-        wlLog('warning', 'Callback Jeedom en échec (' . $code . ') ' . $error);
-        return null;
-    }
-    return $answer;
-}
-
-function wlSchedule() {
-    $answer = wlCallback('action=schedule');
-    if ($answer === null) {
-        return null;
+        return array(null, 'HTTP ' . $code . ' ' . $error);
     }
     $schedule = json_decode($answer, true);
     if (!is_array($schedule) || !isset($schedule['timers']) || !is_array($schedule['timers'])) {
-        wlLog('error', 'Planning illisible reçu de Jeedom.');
-        return null;
+        return array(null, 'planning illisible');
     }
-    return $schedule['timers'];
+    return array($schedule['timers'], '');
+}
+
+/* Réveille plusieurs appareils en parallèle : un WLED muet, dont le réveil
+ * dure le temps de ses relances, ne retarde pas les autres. */
+function wlTick($_eqs) {
+    $multi = curl_multi_init();
+    $handles = array();
+    foreach ($_eqs as $eq => $name) {
+        wlLog('debug', 'Réveil de ' . $name);
+        $handles[$eq] = wlHandle('action=tick&eq=' . (int) $eq);
+        curl_multi_add_handle($multi, $handles[$eq]);
+    }
+    do {
+        $status = curl_multi_exec($multi, $active);
+        if ($active && curl_multi_select($multi, 0.5) === -1) {
+            usleep(20000);
+        }
+    } while ($active && $status == CURLM_OK);
+    foreach ($handles as $eq => $ch) {
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($code !== 200) {
+            wlLog('warning', 'Réveil de ' . $_eqs[$eq] . ' en échec (HTTP ' . $code . ') ' . curl_error($ch));
+        }
+        curl_multi_remove_handle($multi, $ch);
+        curl_close($ch);
+        wlRefused($code);
+    }
+    curl_multi_close($multi);
 }
 
 /* ----------------------------------------------------------------- BOUCLE */
 
 $timers = null;
-$stampSeen = -1;
-$fetchedAt = 0;
-$lastTick = array();   /* [eq] => instant du dernier rappel */
+$stampSeen = null;
+$fetchedAt = -INF;
+$failures = 0;
+$retryAt = -INF;
+$lastTick = array();   /* [eq] => instant (horloge monotone) du dernier rappel */
 
 wlLog('info', 'Démarrage du démon WLED (PID ' . getmypid() . ')');
 
 while ($running) {
-    $now = microtime(true);
+    $clock = wlClock();
 
-    /* Le planning est relu quand le plugin le signale — il touche un fichier
+    /* Le planning est relu quand le plugin le signale — il récrit un fichier
      * témoin à chaque changement de scène — et de toute façon chaque minute,
-     * pour ne jamais rester désynchronisé. */
-    clearstatcache();
-    $mtime = ($stamp !== '' && file_exists($stamp)) ? filemtime($stamp) : 0;
-    if ($timers === null || $mtime !== $stampSeen || $now - $fetchedAt > 60) {
-        $fresh = wlSchedule();
+     * pour ne jamais rester désynchronisé. En cas d'échec, les essais
+     * s'espacent (5 s, 10 s… jusqu'à la minute) au lieu de marteler Jeedom. */
+    $content = ($stamp !== '' && is_readable($stamp)) ? @file_get_contents($stamp) : '';
+    if (($timers === null || $content !== $stampSeen || $clock - $fetchedAt > 60) && $clock >= $retryAt) {
+        $stampNow = $content;
+        list($fresh, $problem) = wlSchedule();
         if ($fresh !== null) {
+            if ($failures > 0) {
+                wlLog('info', 'Jeedom de nouveau joignable');
+            }
             if ($timers === null || count($fresh) !== count($timers)) {
                 wlLog('debug', count($fresh) . ' réveil(s) au planning');
             }
             $timers = $fresh;
-            $stampSeen = $mtime;
-            $fetchedAt = $now;
-        } elseif ($timers === null) {
-            sleep(5);
-            continue;
+            $stampSeen = $stampNow;
+            $fetchedAt = $clock;
+            $failures = 0;
+        } else {
+            $failures++;
+            $retryAt = $clock + min(60, 5 * (1 << min(4, $failures - 1)));
+            if ($failures === 1) {
+                wlLog('warning', 'Callback Jeedom en échec (' . $problem . '), nouvel essai en s\'espaçant');
+            }
         }
     }
 
-    $ticked = false;
-    foreach ($timers as $timer) {
+    $due = array();
+    foreach ((array) $timers as $timer) {
         $eq = (int) $timer['eq'];
-        if ((float) $timer['at'] > $now) {
+        if ((float) $timer['at'] > microtime(true)) {
             continue;
         }
-        /* Garde-fou : un appareil dont le réveil reste dans le passé (le
-         * plugin n'a pas pu agir) n'est pas rappelé plus d'une fois toutes
-         * les deux secondes. */
-        if (isset($lastTick[$eq]) && $now - $lastTick[$eq] < 2) {
+        /* Garde-fou : un appareil dont le réveil reste dans le passé n'est
+         * pas rappelé plus d'une fois par seconde. */
+        if (isset($lastTick[$eq]) && $clock - $lastTick[$eq] < 1) {
             continue;
         }
-        $lastTick[$eq] = $now;
-        wlLog('debug', 'Réveil de ' . (isset($timer['name']) ? $timer['name'] : '#' . $eq));
-        wlCallback('action=tick&eq=' . $eq);
-        $ticked = true;
+        $lastTick[$eq] = $clock;
+        $due[$eq] = isset($timer['name']) ? $timer['name'] : '#' . $eq;
     }
-    /* Un rappel change le planning : on le relit au tour suivant. */
-    if ($ticked) {
+    if (!empty($due)) {
+        wlTick($due);
+        /* Un rappel change le planning : on le relit au tour suivant. */
         $timers = null;
     }
 

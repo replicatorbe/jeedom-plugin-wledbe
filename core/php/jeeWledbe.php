@@ -33,6 +33,9 @@ if (!jeedom::apiAccess(init('apikey'), 'wledbe')) {
 }
 
 if (init('action') == 'schedule') {
+    /* Preuve de vie : un démon qui ne joint plus Jeedom est déclaré arrêté
+     * (wledbe::deamon_info), puis relancé. */
+    cache::set('wledbe::daemon_seen', time());
     header('Content-Type: application/json');
     echo json_encode(wledbe::getSchedule());
     die();
