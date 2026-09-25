@@ -3,7 +3,8 @@
 ## 0.3.2 (beta)
 
 - Scène « Police » : effet « Two Dots » (l'ancien effet Police de WLED),
-  rouge et bleu francs. « Chase 2 » mélangeait les deux couleurs en mauve.
+  rouge et bleu francs, à vitesse maximale comme un gyrophare. « Chase 2 »
+  mélangeait les deux couleurs en mauve.
   Une bibliothèque déjà enregistrée garde sa recette : choisissez « Two Dots »
   dans l'éditeur, ou « Scènes d'origine ».
 

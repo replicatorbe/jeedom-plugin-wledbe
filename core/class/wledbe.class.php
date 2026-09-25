@@ -1434,7 +1434,7 @@ class wledbe extends eqLogic {
                * ce nom en 0.14 : deux points de couleurs franches qui se
                * poursuivent. « Chase 2 » passait par la palette et mélangeait
                * le rouge et le bleu en mauve. */
-              'strip' => array('effect' => 'Two Dots', 'colors' => array('#ff0000', '#0000ff', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 160)),
+              'strip' => array('effect' => 'Two Dots', 'colors' => array('#ff0000', '#0000ff', '#000000'), 'brightness' => 100, 'speed' => 255, 'intensity' => 128)),
         array('id' => 'fuite', 'name' => 'Fuite d\'eau', 'priority' => 80, 'duration' => 300, 'end' => 'restore', 'guard' => 1,
               'strip' => array('effect' => 'Running', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128),
               'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'FUITE')),
