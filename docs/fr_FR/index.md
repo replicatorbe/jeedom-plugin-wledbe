@@ -134,13 +134,14 @@ couleur et son effet.
 ### La bibliothèque
 
 Plugins → Objets connectés → WLED → **Scènes**. La bibliothèque est commune à
-tous vos WLED. Elle est livrée avec six scènes, toutes modifiables :
+tous vos WLED. Elle est livrée avec sept scènes, toutes modifiables :
 
 | Scène | Bande | Matrice | Priorité | Durée | Garde |
 |---|---|---|---|---|---|
 | Alarme intrusion | Strobe Mega rouge et blanc | texte « ALARME » | 100 | 5 min | oui |
 | Incendie | Strobe orange | texte « FEU » | 100 | 5 min | oui |
 | Police | Two Dots (l'ancien effet Police de WLED) : deux faisceaux bleus qui tournent, comme un gyrophare belge | recette bande | 90 | 2 min | non |
+| Police bleu rouge | Two Dots bleu et rouge à pleine intensité (l'ancien « Police All ») : la bande moitié bleue, moitié rouge, qui tourne | recette bande | 90 | 2 min | non |
 | Fuite d'eau | Running bleu | texte « FUITE » | 80 | 5 min | oui |
 | Sonnette | Blink blanc | recette bande | 40 | 10 s | non |
 | Notification | Breathe bleu clair | recette bande | 20 | 15 s | non |

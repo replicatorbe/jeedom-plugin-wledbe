@@ -1437,6 +1437,10 @@ class wledbe extends eqLogic {
                * belge, presque sans rouge. (« Police All », rouge et bleu,
                * c'est « Two Dots » rouge/bleu à intensité 255.) */
               'strip' => array('effect' => 'Two Dots', 'colors' => array('#0000ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 240, 'intensity' => 128)),
+        /* L'ancien « Police All » de WLED : « Two Dots » à intensité 255, la
+         * bande entière moitié bleue, moitié rouge, qui tourne. */
+        array('id' => 'police_bleu_rouge', 'name' => 'Police bleu rouge', 'priority' => 90, 'duration' => 120, 'end' => 'restore', 'guard' => 0,
+              'strip' => array('effect' => 'Two Dots', 'colors' => array('#0000ff', '#ff0000', '#000000'), 'brightness' => 100, 'speed' => 240, 'intensity' => 255)),
         array('id' => 'fuite', 'name' => 'Fuite d\'eau', 'priority' => 80, 'duration' => 300, 'end' => 'restore', 'guard' => 1,
               'strip' => array('effect' => 'Running', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128),
               'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'FUITE')),

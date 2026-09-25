@@ -285,7 +285,7 @@ check('ordre relatif : jamais renvoyé', $fake->posts, 1);
 section('Scènes : bibliothèque et options');
 
 $scenes = wledbe::scenes();
-check('scènes livrées', count($scenes), 6);
+check('scènes livrées', count($scenes), 7);
 check('Police : Two Dots, l\'ancien effet Police de WLED', wledbe::findScene('police')['strip']['effect'], 'Two Dots');
 check('recherche par nom, sans égard à la casse', wledbe::findScene('ALARME INTRUSION')['id'], 'alarme');
 $err = '';
@@ -318,6 +318,7 @@ $strip->setCache('fx_names', $eff);
 $strip->setCache('pal_names', $pal);
 $frag = $strip->sceneFragment(wledbe::findScene('police'), $si['state']);
 check('Police : effet résolu par son nom', $frag['seg'][0]['fx'], 50);
+check('Police bleu rouge : l\'ancien Police All', wledbe::findScene('Police bleu rouge')['strip']['intensity'] . ' ' . implode(',', wledbe::findScene('Police bleu rouge')['strip']['colors']), '255 #0000ff,#ff0000,#000000');
 check('Police : faisceaux bleus sur fond noir', $frag['seg'][0]['col'], array(array(0, 0, 255), array(0, 0, 0), array(0, 0, 0)));
 check('sans fondu', $frag['tt'], 0);
 check('tous les segments visés, par id', $frag['seg'][0]['id'], 0);
@@ -430,7 +431,7 @@ check('plus rien en attente', sceneGetT($strip, 'pending_restore'), null);
 
 /* Commandes de scène. */
 $sceneCmds = array_filter($strip->getCmd('action'), function ($c) { return strpos($c->logicalId, 'scene::') === 0; });
-check('une commande par scène', count($sceneCmds), 6);
+check('une commande par scène', count($sceneCmds), 7);
 $strip->syncSceneCommands(array(wledbe::normalizeScene(array('id' => 'police', 'name' => 'Gyrophare'))));
 $sceneCmds = array_values(array_filter($strip->getCmd('action'), function ($c) { return strpos($c->logicalId, 'scene::') === 0; }));
 check('scènes supprimées : commandes retirées', count($sceneCmds), 1);
@@ -580,7 +581,7 @@ check('nom de scène sans balisage', wledbe::normalizeScene(array('name' => '<b>
 config::save('scenes', '[]', 'wledbe');
 check('bibliothèque vidée : reste vide', wledbe::scenes(), array());
 config::save('scenes', '', 'wledbe');
-check('bibliothèque jamais touchée : scènes livrées', count(wledbe::scenes()), 6);
+check('bibliothèque jamais touchée : scènes livrées', count(wledbe::scenes()), 7);
 
 /* ------------------------------------------------------------------------ */
 section('Relecture : identité et découverte');
