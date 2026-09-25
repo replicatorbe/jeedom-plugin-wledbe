@@ -25,6 +25,16 @@ if (!isConnect('admin')) {
 			</div>
 		</div>
 
+		<div class="form-group">
+			<label class="col-md-4 control-label">{{État instantané}}</label>
+			<div class="col-md-1">
+				<input type="checkbox" class="configKey" data-l1key="live">
+			</div>
+			<div class="col-md-6">
+				<span class="help-block" style="margin:0;">{{Le démon garde une connexion directe (WebSocket) avec chaque WLED, qui signale aussitôt tout changement : bouton de l'appareil, appli WLED… Sinon l'état est relu une fois par minute. Un ESP8266 n'accepte que quelques connexions de ce type ; décochez si l'interface web de WLED se déconnecte souvent.}}</span>
+			</div>
+		</div>
+
 		<legend><i class="fas fa-search"></i> {{Découverte}}</legend>
 		<div class="form-group">
 			<label class="col-md-4 control-label">{{Surveiller le réseau}}</label>

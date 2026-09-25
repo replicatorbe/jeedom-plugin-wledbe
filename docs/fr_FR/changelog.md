@@ -1,5 +1,16 @@
 # Changelog — plugin WLED
 
+## 0.3 (beta)
+
+- Groupes : un équipement qui pilote plusieurs WLED d'un seul ordre, envoyé
+  à tous en parallèle puis vérifié membre par membre ; effets et palettes
+  communs proposés par leur nom ; scènes et texte transmis à chaque membre.
+- Texte sur matrice : commande « Afficher un texte », avec couleur (nommée
+  ou #rrggbb), durée, vitesse, priorité ; jetons d'heure et de date de WLED.
+- État instantané : connexion WebSocket du démon à chaque WLED ; l'état suit
+  en une à deux secondes et la garde réagit aussitôt. Réglable dans la
+  configuration.
+
 ## 0.2.1 (beta)
 
 Relecture complète du code, corrections :

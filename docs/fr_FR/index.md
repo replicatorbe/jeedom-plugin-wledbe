@@ -249,9 +249,81 @@ retentée toutes les 30 secondes pendant une demi-heure, puis abandonnée avec
 un message : une restauration très tardive écraserait ce qui a été fait depuis.
 Une commande manuelle l'annule aussi.
 
+## Les groupes
+
+Un **groupe** pilote plusieurs WLED d'un seul ordre : toute la maison en
+« Police », toutes les bandes éteintes au coucher.
+
+Plugins → Objets connectés → WLED → **Nouveau groupe**, puis cochez ses
+membres dans l'onglet Équipement et enregistrez. Un même WLED peut appartenir
+à plusieurs groupes.
+
+Le groupe reçoit les commandes d'une lumière (allumer, éteindre, basculer,
+luminosité, couleur, effet, palette, vitesse, intensité, état JSON), les
+commandes de scène et « Afficher un texte ». Chaque ordre part vers **tous les
+membres en même temps**, pour que les lampes changent ensemble, puis chaque
+membre est vérifié et relancé s'il le faut, comme s'il avait été commandé seul.
+Si un membre échoue, les autres sont servis quand même ; la commande
+**Vérification** du groupe passe à 0 et **Dernière vérification** dit lequel.
+
+- **Choisir un effet** et **Choisir une palette** ne proposent que ce que
+  **tous** les membres connaissent, par leur nom : chacun le joue avec son
+  propre numéro.
+- **Basculer** éteint tout si un seul membre est allumé, allume tout sinon :
+  les lampes finissent d'accord.
+- Une **scène** lancée sur le groupe est lancée sur chaque membre, dans sa
+  propre pile : à la fin, chacun retrouve son propre éclairage d'avant.
+- **Afficher un texte** ne concerne que les matrices du groupe.
+- Infos : **Etat** (allumé si au moins un membre l'est), **Membres en ligne**
+  (`2/3`).
+
+Un membre désactivé est ignoré. L'onglet Diagnostic du groupe liste ses
+membres, en ligne ou non, allumés ou non.
+
+## Texte sur une matrice
+
+Sur une matrice, la commande **Afficher un texte** fait défiler un texte, le
+temps voulu, puis rend l'affichage d'avant. Le texte va dans le **message**,
+les options dans le **titre** :
+
+| Option | Exemple | Par défaut |
+|---|---|---|
+| couleur | `couleur=rouge`, `couleur=#00ff80` | blanc |
+| durée | `durée=30`, `durée=2m`, `durée=0` (sans fin) | 30 s |
+| vitesse | `vitesse=200` (0 à 255) | 128 |
+| priorité | `priorité=90` | 60 |
+| fin | `fin=éteindre` | rendre l'affichage |
+
+Couleurs nommées : rouge, vert, bleu, blanc, jaune, orange, violet, rose,
+cyan, magenta.
+
+Le texte accepte les jetons de WLED : `#HH:#MM` pour l'heure, `#DD.#MO` pour la
+date, etc. WLED limite le texte à **32 caractères** (moins avec des accents).
+
+C'est une scène comme une autre : elle prend sa place dans la pile, recouvre
+une scène moins prioritaire, et une alarme la recouvre.
+
+## État instantané
+
+Le démon garde une **connexion directe** (WebSocket) avec chaque WLED. WLED y
+signale tout changement dès qu'il a lieu : bouton de l'appareil, appli WLED,
+autre système. Les commandes info de Jeedom suivent en une à deux secondes,
+au lieu d'attendre le relevé de la minute. Une scène **sous garde** défaite
+est réimposée aussitôt, sans attendre son tour de garde.
+
+L'onglet Diagnostic dit si l'appareil est connecté en direct. Si la connexion
+tombe (WLED éteint, Wi-Fi perdu), le démon la rétablit tout seul en espaçant
+ses essais, et le relevé de la minute continue entre-temps : rien ne se perd.
+
+Un ESP8266 n'accepte que quelques connexions WebSocket, interface web de WLED
+comprise. Si celle-ci se déconnecte souvent, décochez **État instantané**
+dans la configuration du plugin.
+
 ## Configuration du plugin
 
 - **Délai d'attente des requêtes** : 3 secondes par défaut.
+- **État instantané** : connexion directe du démon à chaque WLED (cochée par
+  défaut).
 - **Essais par ordre** : 3 par défaut.
 - **Surveiller le réseau** : écoute mDNS horaire, qui corrige les adresses et
   signale les nouveaux WLED.
@@ -260,8 +332,9 @@ Une commande manuelle l'annule aussi.
 
 ## Relevé de l'état
 
-L'état de chaque WLED est relu **une fois par minute**, et immédiatement après
-chaque ordre. Un appareil injoignable n'est plus relu que toutes les cinq
+L'état de chaque WLED est poussé en direct par l'appareil (voir « État
+instantané »), relu immédiatement après chaque ordre, et de toute façon relu
+**une fois par minute**, tous les appareils en parallèle. Un appareil injoignable n'est plus relu que toutes les cinq
 minutes, pour ne pas retarder les autres.
 
 ## Dépannage

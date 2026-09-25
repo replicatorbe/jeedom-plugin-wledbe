@@ -192,9 +192,73 @@ function wledbeShowFound(_result) {
   })
 }
 
+/* ================================================================= GROUPES */
+
+function wledbeAddGroup() {
+  wledbePrompt('{{Nom du nouveau groupe}}', '', '{{Toute la maison}}', function (_name) {
+    var name = String(_name).trim()
+    if (name === '') { return }
+    wledbeAjax('createGroup', { name: name }, function (result) {
+      wledbeReload(result.result.id)
+    })
+  })
+}
+
+/* Les cases des membres et le champ caché qui part à l'enregistrement. */
+function wledbeMembersToInput() {
+  var ids = []
+  document.querySelectorAll('.wledbeMember').forEach(function (_box) {
+    if (_box.checked) { ids.push(_box.getAttribute('data-id')) }
+  })
+  var input = wledbeEl('in_wledbeMembers')
+  if (input !== null) { input.value = ids.join(',') }
+  if (typeof jeeFrontEnd !== 'undefined') { jeeFrontEnd.modifyWithoutSave = true }
+}
+
+function wledbeMembersFromConf(_members) {
+  var ids = {}
+  var list = Array.isArray(_members) ? _members : String(_members || '').split(',')
+  list.forEach(function (_id) { ids[String(_id).trim()] = true })
+  document.querySelectorAll('.wledbeMember').forEach(function (_box) {
+    _box.checked = ids[_box.getAttribute('data-id')] === true
+    /* Un groupe ne se contient pas lui-même. */
+    _box.closest('.checkbox').style.display = (_box.getAttribute('data-id') === String(wledbeCurrentId())) ? 'none' : ''
+  })
+}
+
+function wledbeRenderMembers(_data) {
+  var div = wledbeEl('div_wledbeMembers')
+  if (div === null) { return }
+  if (!isset(_data) || !_data.group) {
+    div.innerHTML = ''
+    return
+  }
+  var state = wledbeEl('div_wledbeState')
+  if (state !== null) {
+    state.className = 'alert alert-info'
+    state.textContent = _data.members.length + ' {{membre(s) actif(s)}}'
+  }
+  if (_data.members.length === 0) {
+    div.innerHTML = '<p class="text-muted">{{Aucun membre actif : cochez des WLED dans l\'onglet Équipement.}}</p>'
+    return
+  }
+  var html = '<table class="table table-condensed"><thead><tr><th>{{Membre}}</th><th>{{En ligne}}</th><th>{{Allumé}}</th></tr></thead><tbody>'
+  _data.members.forEach(function (_m) {
+    html += '<tr><td>' + wledbeEscape(_m.name) + (_m.matrix ? ' <span class="label label-info">{{matrice}}</span>' : '') + '</td>'
+    html += '<td>' + (_m.online ? '<span class="label label-success">{{oui}}</span>' : '<span class="label label-danger">{{non}}</span>') + '</td>'
+    html += '<td>' + (_m.on ? '{{oui}}' : '{{non}}') + '</td></tr>'
+  })
+  div.innerHTML = html + '</tbody></table>'
+}
+
 /* ============================================================== DIAGNOSTIC */
 
 function wledbeRender(_data) {
+  if (isset(_data) && _data.group) {
+    wledbeRenderMembers(_data)
+    return
+  }
+  wledbeRenderMembers(null)
   var state = wledbeEl('div_wledbeState')
   if (state !== null && isset(_data)) {
     var lists = (_data.effects !== undefined)
@@ -209,6 +273,7 @@ function wledbeRender(_data) {
     } else if (_data.online) {
       state.className = 'alert alert-success'
       state.textContent = '{{Dernier relevé :}} ' + _data.fetchedAt + lists
+        + ' · ' + (_data.live ? '{{connexion directe : état instantané}}' : '{{pas de connexion directe : état relu chaque minute}}')
     } else {
       state.className = 'alert alert-warning'
       state.textContent = '{{Injoignable :}} ' + _data.failures + ' {{échec(s) consécutif(s)}}'
@@ -547,6 +612,10 @@ function printEqLogic(_eqLogic) {
   /* Les textes fournis par l'appareil (nom, version…) sont posés en texte :
      un WLED renommé en balisage ne doit rien exécuter dans la page. */
   var conf = isset(_eqLogic.configuration) ? _eqLogic.configuration : {}
+  var group = conf.kind === 'group'
+  document.querySelectorAll('.wledbeGroupOnly').forEach(function (_el) { _el.style.display = group ? '' : 'none' })
+  document.querySelectorAll('.wledbeDeviceOnly').forEach(function (_el) { _el.style.display = group ? 'none' : '' })
+  wledbeMembersFromConf(conf.members)
   wledbeText('span_wledbeDeviceName', conf.device_name)
   wledbeText('span_wledbeLeds', conf.leds ? conf.leds + ' {{LED}}' : '')
   wledbeText('span_wledbeMac', conf.mac)
@@ -640,6 +709,7 @@ if (!window.wledbeListening) {
       bt_wledbeRefresh: wledbeRefresh,
       bt_wledbeLists: wledbeLists,
       bt_wledbeScenes: wledbeScenesToggle,
+      bt_wledbeAddGroup: wledbeAddGroup,
       bt_wledbeScenesSave: wledbeScenesSave,
       bt_wledbeSceneAdd: wledbeSceneAdd,
       bt_wledbeScenesReset: wledbeScenesReset,
@@ -655,6 +725,11 @@ if (!window.wledbeListening) {
         actions[id]()
         return
       }
+    }
+  })
+  document.addEventListener('change', function (_event) {
+    if (_event.target && _event.target.classList && _event.target.classList.contains('wledbeMember')) {
+      wledbeMembersToInput()
     }
   })
   /* Toute saisie dans l'éditeur de scènes le marque comme modifié. */

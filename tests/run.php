@@ -181,6 +181,23 @@ section('Envoi vérifié, sur un WLED simulé');
 /* Un WLED qui perd le premier ordre (répond comme si rien n'avait changé),
  * puis l'applique au deuxième envoi. */
 class wledbeFake extends wledbe {
+    /* Les WLED simulés, par adresse : l'envoi parallèle des groupes les
+     * retrouve ici au lieu de passer par le réseau. */
+    public static $byIp = array();
+
+    protected static function multiPost($_requests, $_connectMs, $_totalMs) {
+        $out = array();
+        foreach ($_requests as $key => $request) {
+            $ip = parse_url($request['url'], PHP_URL_HOST);
+            try {
+                $out[$key] = isset(self::$byIp[$ip]) ? json_encode(self::$byIp[$ip]->call('POST', '/json/state', json_decode($request['body'], true))) : null;
+            } catch (Throwable $e) {
+                $out[$key] = null;
+            }
+        }
+        return $out;
+    }
+
     public $state;
     public $posts = 0;
     public $lose = 0;
@@ -597,6 +614,122 @@ check('octet > 255 refusé', $err !== '', true);
 $sceneCmd = new wledbeCmd();
 $sceneCmd->logicalId = 'scene::police';
 check('commande de scène protégée de la sauvegarde de page', $sceneCmd->dontRemoveCmd(), true);
+
+
+/* ------------------------------------------------------------------------ */
+section('V3 : groupes');
+
+/* Un groupe simulé, dont les membres sont donnés directement. */
+class wledbeFakeGroup extends wledbeFake {
+    public $fakeMembers = array();
+    public function members() { return $this->fakeMembers; }
+}
+
+check('membres en texte « 12,34 »', wledbe::parseMembers('12, 34,12'), array(12, 34));
+check('membres en liste', wledbe::parseMembers(array('5', 0, 'x', 7)), array(5, 7));
+check('membres vides', wledbe::parseMembers(''), array());
+
+$fxOld = $eff;                                  /* numérotation 16.0 */
+$fxNew = array_merge(array('Solid', 'Nouveau'), array_slice($eff, 1));  /* numéros décalés d'un cran */
+$a = new wledbeFake(); $a->id = 80; $a->configuration = array('ip' => '10.0.0.80', 'verify' => 1, 'layout' => 'strip');
+$b = new wledbeFake(); $b->id = 81; $b->configuration = array('ip' => '10.0.0.81', 'verify' => 1, 'layout' => 'matrix');
+$a->setCache('fx_names', $fxOld); $b->setCache('fx_names', $fxNew);
+$a->setCache('pal_names', $pal);  $b->setCache('pal_names', $pal);
+$a->state = $si['state']; $b->state = $si['state'];
+$a->createCommands(); $b->createCommands();
+wledbeFake::$byIp = array('10.0.0.80' => $a, '10.0.0.81' => $b);
+
+$g = new wledbeFakeGroup(); $g->id = 90;
+$g->configuration = array('kind' => 'group', 'members' => array(80, 81));
+$g->fakeMembers = array($a, $b);
+check('un groupe est un groupe', $g->isGroup(), true);
+check('un groupe n\'est pas relevé', $g->isConfigured(), false);
+$g->createCommands();
+check('groupe : commande « Membres en ligne »', is_object($g->getCmd('info', 'members_online')), true);
+check('groupe : pas de commande de preset', $g->getCmd('action', 'preset_set'), null);
+
+$a->posts = 0; $b->posts = 0;
+$g->runAction('on_set', array());
+check('allumer le groupe : les deux membres allumés', array($a->state['on'], $b->state['on']), array(true, true));
+check('un seul envoi par membre (parallèle, vérifié du premier coup)', array($a->posts, $b->posts), array(1, 1));
+check('vérification du groupe OK', $g->published['verify_ok'], 1);
+
+$g->runAction('effect_set', array('select' => 'Chase 2'));
+check('effet par nom : numéro propre à chaque membre', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(37, 38));
+
+$g->refreshGroupLists();
+$list = $g->getCmd('action', 'effect_set')->configuration['listValue'];
+check('liste du groupe : effets communs, par nom', strpos($list, 'Chase 2|Chase 2') !== false, true);
+check('liste du groupe : un effet d\'un seul membre absent', strpos($list, 'Nouveau') === false, true);
+
+$a->state['on'] = false;
+$g->runAction('toggle', array());
+check('basculer avec un membre allumé : tout s\'éteint', array($a->state['on'], $b->state['on']), array(false, false));
+$g->runAction('toggle', array());
+check('basculer tout éteint : tout s\'allume', array($a->state['on'], $b->state['on']), array(true, true));
+
+/* Un membre qui perd l'ordre : les autres sont servis, l'échec est dit. */
+$b->lose = 10;
+$err = '';
+try { $g->runAction('off_set', array()); } catch (Exception $e) { $err = $e->getMessage(); }
+$b->lose = 0;
+check('membre en échec : l\'autre est servi', $a->state['on'], false);
+check('membre en échec : erreur rendue', $err !== '', true);
+check('membre en échec : vérification du groupe à 0', $g->published['verify_ok'], 0);
+
+/* Scène sur le groupe : chaque membre la joue et la rend. */
+$a->state = $si['state']; $b->state = $si['state'];
+$g->runAction('scene::police', array());
+check('scène de groupe : police sur les deux', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(37, 38));
+$g->runAction('scene_stop_all', array());
+check('arrêt de groupe : éclairage rendu partout', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(0, 0));
+
+/* Texte : seules les matrices du groupe l'affichent. */
+$g->runAction('text_show', array('message' => 'BONJOUR', 'title' => 'couleur=vert durée=10'));
+check('texte de groupe : sur la matrice', $b->state['seg'][0]['n'] ?? '', 'BONJOUR');
+check('texte de groupe : pas sur la bande', isset($a->state['seg'][0]['n']), false);
+$b->stopScenes(true);
+
+/* ------------------------------------------------------------------------ */
+section('V3 : texte sur matrice');
+
+check('couleur nommée', wledbe::parseColor('Rouge'), '#ff0000');
+check('couleur hexadécimale', wledbe::parseColor('00FF80'), '#00ff80');
+check('options de texte', wledbe::parseSceneOptions('couleur=bleu durée=20 vitesse=200', null, true),
+    array('color' => '#0000ff', 'duration' => 20, 'speed' => 200));
+$err = '';
+try { wledbe::parseSceneOptions('couleur=bleu'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('« couleur » refusée pour une scène de la bibliothèque', $err !== '', true);
+$b->state = $si['state'];
+$b->showText('ALERTE', 'couleur=rouge durée=15');
+check('texte : effet Scrolling Text', $b->state['seg'][0]['fx'], array_search('Scrolling Text', $fxNew, true));
+check('texte : couleur', $b->state['seg'][0]['col'][0], array(255, 0, 0));
+check('texte : durée', $b->stack()[0]['duration'], 15);
+$b->stopScenes(true);
+check('texte fini : nom de segment effacé', isset($b->state['seg'][0]['n']), false);
+$err = '';
+try { $a->showText('X'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('texte refusé sur une bande', strpos($err, 'matrice') !== false, true);
+check('commande « Afficher un texte » sur la matrice', is_object($b->getCmd('action', 'text_show')), true);
+check('pas sur la bande', $a->getCmd('action', 'text_show'), null);
+
+/* ------------------------------------------------------------------------ */
+section('V3 : état poussé et garde');
+
+$a->state = $si['state'];
+$a->startScene('alarme', array('duration' => 0));
+sceneSetT($a, array('guard_at' => time() + 8, 'guard_ran' => time() - 60));
+$pushed = array('state' => $a->state, 'info' => $si['info']);
+$pushed['info']['mac'] = 'aabbcc112233';
+$pushed['state']['on'] = false;
+$a->configuration['mac'] = 'aabbcc112233';
+$a->ingestLive($pushed);
+check('état poussé : publié aussitôt', $a->published['on'], 0);
+check('scène sous garde défaite : garde avancée à maintenant', (int) sceneGetT($a, 'guard_at') <= time(), true);
+sceneSetT($a, array('guard_at' => time() + 8, 'guard_ran' => time()));
+$a->ingestLive($pushed);
+check('garde qui vient de tourner : pas relancée en boucle', (int) sceneGetT($a, 'guard_at') > time(), true);
+$a->stopScenes(true);
 
 /* ------------------------------------------------------------------------ */
 section('Commandes');

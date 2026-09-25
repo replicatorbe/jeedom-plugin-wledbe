@@ -19,6 +19,8 @@
  * Point d'entrée du démon, protégé par la clé API du plugin :
  *   GET ?apikey=…&action=schedule     → les prochains réveils, en JSON
  *   GET ?apikey=…&action=tick&eq=ID   → fait avancer les scènes de l'appareil
+ *   POST ?apikey=…&action=push {"pushes":{ID:{state,info}}} → états poussés
+ *                                         par les WLED en WebSocket
  *
  * Le démon ne sait rien des scènes : il rappelle à l'heure dite, et tick()
  * décide de ce qu'il y a à faire.
@@ -36,6 +38,10 @@ if (init('action') == 'schedule') {
     /* Preuve de vie : un démon qui ne joint plus Jeedom est déclaré arrêté
      * (wledbe::deamon_info), puis relancé. */
     cache::set('wledbe::daemon_seen', time());
+    /* Appareils auxquels le démon est connecté en WebSocket, pour le
+     * diagnostic. */
+    $connected = array_values(array_filter(array_map('intval', explode(',', (string) init('connected')))));
+    cache::set('wledbe::live', array('at' => time(), 'eqs' => $connected));
     header('Content-Type: application/json');
     echo json_encode(wledbe::getSchedule());
     die();
@@ -52,6 +58,23 @@ if (init('action') == 'tick') {
         $eqLogic->tick();
     } catch (Throwable $e) {
         log::add('wledbe', 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
+    }
+    echo 'OK';
+    die();
+}
+
+if (init('action') == 'push') {
+    $payload = json_decode(file_get_contents('php://input'), true);
+    foreach ((is_array($payload) && isset($payload['pushes']) && is_array($payload['pushes'])) ? $payload['pushes'] : array() as $id => $data) {
+        $eqLogic = eqLogic::byId((int) $id);
+        if (!is_object($eqLogic) || $eqLogic->getEqType_name() != 'wledbe' || !$eqLogic->getIsEnable()) {
+            continue;
+        }
+        try {
+            $eqLogic->ingestLive($data);
+        } catch (Throwable $e) {
+            log::add('wledbe', 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
+        }
     }
     echo 'OK';
     die();

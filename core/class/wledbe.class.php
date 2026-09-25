@@ -254,13 +254,45 @@ class wledbe extends eqLogic {
      * ne peut rien relire d'autre. */
     public static function getSchedule() {
         $timers = array();
+        $live = array();
         foreach (self::byType(__CLASS__, true) as $eqLogic) {
             $at = $eqLogic->nextWake();
             if ($at !== null) {
                 $timers[] = array('eq' => (int) $eqLogic->getId(), 'at' => $at, 'name' => $eqLogic->getHumanName());
             }
+            if ($eqLogic->isConfigured() && !$eqLogic->isGroup() && config::byKey('live', __CLASS__, 1) == 1) {
+                $live[] = array('eq' => (int) $eqLogic->getId(), 'ip' => $eqLogic->getConfiguration('ip'), 'name' => $eqLogic->getHumanName());
+            }
         }
-        return array('timers' => $timers);
+        return array('timers' => $timers, 'live' => $live);
+    }
+
+    /*
+     * État poussé par un WLED sur la connexion WebSocket que tient le démon :
+     * même contenu que /json/si, traité par le même chemin. Et si une scène
+     * sous garde vient d'être défaite, la garde est avancée à maintenant au
+     * lieu d'attendre son prochain tour.
+     */
+    public function ingestLive($_data) {
+        if (!is_array($_data) || !isset($_data['state']) || !is_array($_data['state'])) {
+            return;
+        }
+        $this->ingest($_data);
+        $this->withLock(function () use ($_data) {
+            $top = self::topEntry($this->stack());
+            $fragment = $this->sceneGet('applied_fragment', null);
+            /* Au plus une garde avancée toutes les cinq secondes : une scène
+             * que l'appareil refuse d'appliquer ne doit pas faire boucler
+             * garde, renvoi et nouvel état poussé. */
+            if ($top !== null && !empty($top['guard']) && is_array($fragment)
+                && $top['key'] === (string) $this->sceneGet('applied_key', '')
+                && time() - (int) $this->sceneGet('guard_ran', 0) >= 5
+                && (int) $this->sceneGet('guard_at', 0) > time()
+                && !empty(self::mismatches($fragment, $_data['state']))) {
+                $this->sceneSet(array('guard_at' => time()));
+                self::notifyDaemon();
+            }
+        }, false);
     }
 
     /* ======================================================== CYCLE DE VIE */
@@ -274,6 +306,10 @@ class wledbe extends eqLogic {
         if ($this->getConfiguration('verify', '') === '') {
             $this->setConfiguration('verify', 1);
         }
+        if ($this->isGroup()) {
+            $this->setConfiguration('members', self::parseMembers($this->getConfiguration('members', array())));
+            return;
+        }
         $this->setConfiguration('ip', trim((string) $this->getConfiguration('ip', '')));
         $mac = self::normalizeMac($this->getConfiguration('mac', ''));
         if ($mac !== '') {
@@ -284,6 +320,11 @@ class wledbe extends eqLogic {
 
     public function postSave() {
         $this->createCommands();
+        if ($this->isGroup()) {
+            $this->refreshGroupLists();
+            $this->refreshGroup();
+            return;
+        }
         if ($this->getCache('ip_seen', '') !== $this->getConfiguration('ip')) {
             $this->setCache('ip_seen', $this->getConfiguration('ip'));
             $this->setCache('failures', 0);
@@ -873,6 +914,9 @@ class wledbe extends eqLogic {
         }
         $this->updateList('palette_set', $pal);
         $this->updateList('preset_set', self::presetList($presets));
+        foreach ($this->groups() as $group) {
+            $group->refreshGroupLists();
+        }
         return array('effects' => count($effects), 'palettes' => count($palettes), 'presets' => count(self::presetList($presets)));
     }
 
@@ -1506,7 +1550,7 @@ class wledbe extends eqLogic {
      *   « délai=10 »   « heure=22:30 »   « priorité=95 »   « fin=éteindre »
      * Les unités s, m, h sont comprises ; sans unité, ce sont des secondes.
      */
-    public static function parseSceneOptions($_text, $_now = null) {
+    public static function parseSceneOptions($_text, $_now = null, $_textOptions = false) {
         $now = $_now === null ? time() : (int) $_now;
         $options = array();
         $text = trim((string) $_text);
@@ -1567,6 +1611,20 @@ class wledbe extends eqLogic {
                         throw new Exception(__('Fin de scène illisible (restaurer, éteindre ou garder) :', __FILE__) . ' ' . $value);
                     }
                     $options['end'] = $map[$v];
+                    break;
+                case 'couleur':
+                case 'color':
+                    if (!$_textOptions) {
+                        throw new Exception(__('Option de scène inconnue :', __FILE__) . ' ' . $token);
+                    }
+                    $options['color'] = self::parseColor($value);
+                    break;
+                case 'vitesse':
+                case 'speed':
+                    if (!$_textOptions || !is_numeric($value)) {
+                        throw new Exception(__('Option de scène inconnue ou illisible :', __FILE__) . ' ' . $token);
+                    }
+                    $options['speed'] = max(0, min(255, (int) $value));
                     break;
                 default:
                     throw new Exception(__('Option de scène inconnue :', __FILE__) . ' ' . $token);
@@ -2129,7 +2187,7 @@ class wledbe extends eqLogic {
             $fragment = $this->sceneGet('applied_fragment', null);
             if ($top !== null && !empty($top['guard']) && $top['key'] === (string) $this->sceneGet('applied_key', '')
                 && is_array($fragment) && (int) $this->sceneGet('guard_at', 0) <= $now) {
-                $this->sceneSet(array('guard_at' => $now + self::GUARD_EVERY));
+                $this->sceneSet(array('guard_at' => $now + self::GUARD_EVERY, 'guard_ran' => $now));
                 try {
                     $diff = self::mismatches($fragment, $this->call('GET', '/json/state'));
                     if (!empty($diff)) {
@@ -2180,13 +2238,358 @@ class wledbe extends eqLogic {
         $this->publishCmd('scene_until', $top === null ? '' : ((int) $top['until'] > 0 ? date('H:i:s', (int) $top['until']) : __('sans fin', __FILE__)));
     }
 
+    /* ========================================================= TEXTE SUR MATRICE */
+
+    /* Couleurs qu'un scénario peut nommer au lieu d'écrire #rrggbb. */
+    const COLOR_NAMES = array(
+        'rouge' => '#ff0000', 'vert' => '#00ff00', 'bleu' => '#0000ff', 'blanc' => '#ffffff',
+        'jaune' => '#ffff00', 'orange' => '#ff8000', 'violet' => '#8000ff', 'rose' => '#ff40a0',
+        'cyan' => '#00ffff', 'magenta' => '#ff00ff',
+        'red' => '#ff0000', 'green' => '#00ff00', 'blue' => '#0000ff', 'white' => '#ffffff',
+        'yellow' => '#ffff00', 'purple' => '#8000ff', 'pink' => '#ff40a0',
+    );
+
+    public static function parseColor($_value) {
+        $v = self::slug($_value);
+        if (isset(self::COLOR_NAMES[$v])) {
+            return self::COLOR_NAMES[$v];
+        }
+        $hex = '#' . strtolower(ltrim(trim((string) $_value), '#'));
+        if (!preg_match('/^#[0-9a-f]{6}$/', $hex)) {
+            throw new Exception(__('Couleur illisible (nom comme « rouge », ou #rrggbb) :', __FILE__) . ' ' . $_value);
+        }
+        return $hex;
+    }
+
+    /*
+     * Affiche un texte défilant sur une matrice, le temps voulu, puis rend
+     * l'affichage d'avant. C'est une scène comme une autre, fabriquée pour
+     * l'occasion : elle prend sa place dans la pile, avec sa priorité.
+     *
+     *   texte   : ce qui défile (32 octets au plus, la limite de WLED)
+     *   options : couleur=rouge  durée=30  vitesse=200  priorité=60  fin=…
+     *
+     * Le texte peut porter les jetons de WLED : #HH:#MM pour l'heure, #DD.#MO
+     * pour la date…
+     */
+    public function showText($_text, $_options = '') {
+        if (!$this->isMatrix()) {
+            throw new Exception(__('Le texte défilant ne s\'affiche que sur une matrice.', __FILE__));
+        }
+        $text = trim((string) $_text);
+        if ($text === '') {
+            throw new Exception(__('Aucun texte à afficher.', __FILE__));
+        }
+        $options = self::parseSceneOptions($_options, null, true);
+        $color = isset($options['color']) ? $options['color'] : '#ffffff';
+        $scene = array(
+            'id' => 'texte', 'name' => __('Texte', __FILE__),
+            'priority' => isset($options['priority']) ? $options['priority'] : 60,
+            'duration' => isset($options['duration']) ? $options['duration'] : 30,
+            'end' => isset($options['end']) ? $options['end'] : 'restore', 'guard' => 0,
+            'strip' => array('effect' => 'Solid', 'colors' => array($color)),
+            'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array($color, '#000000', '#000000'),
+                              'brightness' => 100, 'speed' => isset($options['speed']) ? $options['speed'] : 128,
+                              'intensity' => 128, 'text' => $text),
+        );
+        unset($options['color'], $options['speed']);
+        return $this->playScene($scene, $options);
+    }
+
+    /* ================================================================ GROUPES */
+
+    /*
+     * Un groupe est un équipement du plugin sans appareil propre : il pilote
+     * d'un seul ordre les WLED qu'on y a cochés — toute la maison en
+     * « Police », toutes les bandes éteintes. Chaque membre garde sa propre
+     * vérification et sa propre pile de scènes : un groupe n'est qu'une façon
+     * d'adresser plusieurs appareils.
+     *
+     * Les commandes simples partent en parallèle, pour que les lampes
+     * changent ensemble ; les scènes sont lancées membre par membre.
+     */
+    public function isGroup() {
+        return $this->getConfiguration('kind', 'device') === 'group';
+    }
+
+    /* Identifiants des membres, lus dans la configuration (liste ou texte
+     * « 12,34 » posté par la page). */
+    public static function parseMembers($_value) {
+        if (is_string($_value)) {
+            $decoded = json_decode($_value, true);
+            $_value = is_array($decoded) ? $decoded : preg_split('/[\s,;]+/', $_value);
+        }
+        $ids = array();
+        foreach ((array) $_value as $id) {
+            if (is_numeric($id) && (int) $id > 0) {
+                $ids[(int) $id] = (int) $id;
+            }
+        }
+        return array_values($ids);
+    }
+
+    /* Les membres existants, actifs et configurés. */
+    public function members() {
+        $members = array();
+        foreach (self::parseMembers($this->getConfiguration('members', array())) as $id) {
+            $eqLogic = self::byId($id);
+            if (is_object($eqLogic) && $eqLogic->getEqType_name() === __CLASS__ && !$eqLogic->isGroup()
+                && $eqLogic->getIsEnable() && $eqLogic->isConfigured()) {
+                $members[] = $eqLogic;
+            }
+        }
+        return $members;
+    }
+
+    public static function createGroup($_name) {
+        $name = trim((string) $_name);
+        if ($name === '') {
+            throw new Exception(__('Donnez un nom au groupe.', __FILE__));
+        }
+        $eqLogic = new self();
+        $eqLogic->setEqType_name(__CLASS__);
+        $eqLogic->setName($name);
+        $eqLogic->setConfiguration('kind', 'group');
+        $eqLogic->setConfiguration('members', array());
+        $eqLogic->setIsEnable(1);
+        $eqLogic->setIsVisible(1);
+        $eqLogic->setCategory('light', 1);
+        $eqLogic->save();
+        return $eqLogic;
+    }
+
+    /*
+     * Envoi en parallèle d'un ordre par membre. Premier envoi simultané, avec
+     * « v »:true ; les membres dont l'état relu concorde sont réglés ; les
+     * autres passent par sendState(), avec ses relances. Rend la liste des
+     * échecs, par membre.
+     */
+    public static function sendStateMany($_orders) {
+        $requests = array();
+        foreach ($_orders as $id => $order) {
+            $body = $order['fragment'];
+            $body['v'] = true;
+            $requests[$id] = array('url' => 'http://' . $order['eq']->getConfiguration('ip') . '/json/state', 'body' => json_encode($body));
+        }
+        $timeout = self::timeout() * 1000;
+        $answers = static::multiPost($requests, min(3000, $timeout), $timeout);
+        $errors = array();
+        foreach ($_orders as $id => $order) {
+            $eq = $order['eq'];
+            $fragment = $order['fragment'];
+            $state = isset($answers[$id]) ? json_decode($answers[$id], true) : null;
+            if (is_array($state) && isset($state['state']) && is_array($state['state'])) {
+                $state = $state['state'];
+            }
+            $verify = (int) $eq->getConfiguration('verify', 1) === 1;
+            if (is_array($state) && isset($state['on']) && (!$verify || empty(self::mismatches($fragment, $state)))) {
+                $eq->clearFailure();
+                $eq->publishValues(self::stateValues($state, array(), $eq->getCache('fx_names', array()), $eq->getCache('pal_names', array())));
+                $eq->verifyDone(true, $verify ? __('OK', __FILE__) : __('non vérifié', __FILE__));
+                continue;
+            }
+            /* Premier envoi perdu ou écart : le chemin complet, avec relecture
+             * et relances, pour ce membre seulement. */
+            try {
+                $eq->sendState($fragment);
+            } catch (Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        return $errors;
+    }
+
+    protected static function multiPost($_requests, $_connectMs, $_totalMs) {
+        if (empty($_requests)) {
+            return array();
+        }
+        $multi = curl_multi_init();
+        $handles = array();
+        foreach ($_requests as $key => $request) {
+            $ch = curl_init($request['url']);
+            curl_setopt_array($ch, array(
+                CURLOPT_RETURNTRANSFER    => true,
+                CURLOPT_CONNECTTIMEOUT_MS => $_connectMs,
+                CURLOPT_TIMEOUT_MS        => $_totalMs,
+                CURLOPT_PROXY             => '',
+                CURLOPT_POST              => true,
+                CURLOPT_POSTFIELDS        => $request['body'],
+                CURLOPT_HTTPHEADER        => array('Content-Type: application/json'),
+            ));
+            curl_multi_add_handle($multi, $ch);
+            $handles[$key] = $ch;
+        }
+        do {
+            $status = curl_multi_exec($multi, $active);
+            if ($active && curl_multi_select($multi, 0.2) === -1) {
+                usleep(10000);
+            }
+        } while ($active && $status == CURLM_OK);
+        $out = array();
+        foreach ($handles as $key => $ch) {
+            $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $body = curl_multi_getcontent($ch);
+            $out[$key] = ($code === 200 && is_string($body)) ? $body : null;
+            curl_multi_remove_handle($multi, $ch);
+            curl_close($ch);
+        }
+        curl_multi_close($multi);
+        return $out;
+    }
+
+    /* Les commandes d'un groupe : chaque membre reçoit la sienne. Tous les
+     * membres sont servis même si l'un échoue ; l'échec est rendu à la fin,
+     * membre par membre. */
+    private function runGroupAction($_logicalId, $_options) {
+        $members = $this->members();
+        if (empty($members)) {
+            throw new Exception(__('Ce groupe n\'a aucun membre actif.', __FILE__));
+        }
+        $errors = array();
+        $each = function ($_callback) use ($members, &$errors) {
+            foreach ($members as $member) {
+                try {
+                    $_callback($member);
+                } catch (Throwable $e) {
+                    $errors[] = $member->getHumanName() . ' : ' . $e->getMessage();
+                }
+            }
+        };
+
+        if (strpos($_logicalId, 'scene::') === 0) {
+            $ref = substr($_logicalId, 7);
+            $each(function ($m) use ($ref) { $m->startScene($ref); });
+        } else {
+            switch ($_logicalId) {
+                case 'refresh':
+                    $each(function ($m) { $m->pollNow(); });
+                    break;
+                case 'scene_start':
+                    $ref = isset($_options['title']) ? trim((string) $_options['title']) : '';
+                    if ($ref === '') {
+                        throw new Exception(__('Indiquez le nom de la scène dans le titre.', __FILE__));
+                    }
+                    $options = self::parseSceneOptions(isset($_options['message']) ? $_options['message'] : '');
+                    $scene = self::findScene($ref);
+                    $each(function ($m) use ($scene, $options) { $m->playScene($scene, $options); });
+                    break;
+                case 'scene_stop':
+                    $each(function ($m) { $m->stopScenes(false); });
+                    break;
+                case 'scene_stop_all':
+                    $each(function ($m) { $m->stopScenes(true); });
+                    break;
+                case 'text_show':
+                    $text = isset($_options['message']) ? $_options['message'] : '';
+                    $opts = isset($_options['title']) ? $_options['title'] : '';
+                    $matrices = array_filter($members, function ($m) { return $m->isMatrix(); });
+                    if (empty($matrices)) {
+                        throw new Exception(__('Ce groupe ne contient aucune matrice.', __FILE__));
+                    }
+                    foreach ($matrices as $m) {
+                        try {
+                            $m->showText($text, $opts);
+                        } catch (Throwable $e) {
+                            $errors[] = $m->getHumanName() . ' : ' . $e->getMessage();
+                        }
+                    }
+                    break;
+                default:
+                    /* Basculer : tout s'éteint si un seul membre est allumé,
+                     * sinon tout s'allume — les lampes finissent d'accord. */
+                    if ($_logicalId === 'toggle') {
+                        $anyOn = false;
+                        foreach ($members as $m) {
+                            $anyOn = $anyOn || $m->isOn(false);
+                        }
+                        $_logicalId = $anyOn ? 'off_set' : 'on_set';
+                    }
+                    $orders = array();
+                    foreach ($members as $m) {
+                        try {
+                            $fragment = $m->fragmentFor($_logicalId, $_options);
+                        } catch (Throwable $e) {
+                            $errors[] = $m->getHumanName() . ' : ' . $e->getMessage();
+                            continue;
+                        }
+                        if ($fragment !== null) {
+                            $m->abandonScenes();
+                            $orders[$m->getId()] = array('eq' => $m, 'fragment' => $fragment);
+                        }
+                    }
+                    $errors = array_merge($errors, static::sendStateMany($orders));
+            }
+        }
+        $this->refreshGroup();
+        $this->publishCmd('verify_ok', empty($errors) ? 1 : 0);
+        $this->publishCmd('verify_detail', date('H:i:s') . ' ' . (empty($errors) ? __('OK', __FILE__) : implode(' ; ', $errors)));
+        if (!empty($errors)) {
+            throw new Exception($this->getHumanName() . ' : ' . implode(' ; ', $errors));
+        }
+        return true;
+    }
+
+    /* Infos du groupe, tirées de celles de ses membres. */
+    public function refreshGroup() {
+        $members = $this->members();
+        $on = 0;
+        $online = 0;
+        foreach ($members as $m) {
+            $on = $on || $m->isOn(false) ? 1 : 0;
+            $cmd = $m->getCmd('info', 'online');
+            $online += (is_object($cmd) && (int) $cmd->execCmd() === 1) ? 1 : 0;
+        }
+        $this->publishCmd('on', $on);
+        $this->publishCmd('members_online', $online . '/' . count($members));
+    }
+
+    /* Listes du groupe : les effets et palettes que tous ses membres
+     * connaissent, désignés par leur nom — leurs numéros diffèrent d'un
+     * appareil à l'autre. */
+    public function refreshGroupLists() {
+        $effects = null;
+        $palettes = null;
+        foreach ($this->members() as $m) {
+            $fx = array_values(array_filter((array) $m->getCache('fx_names', array()), function ($n) { return $n !== '' && $n !== 'RSVD' && $n !== '-'; }));
+            $pal = array_values((array) $m->getCache('pal_names', array()));
+            $effects = $effects === null ? $fx : array_values(array_intersect($effects, $fx));
+            $palettes = $palettes === null ? $pal : array_values(array_intersect($palettes, $pal));
+        }
+        $effects = array_unique((array) $effects);
+        natcasesort($effects);
+        $list = array();
+        foreach ($effects as $name) {
+            $list[$name] = $name;
+        }
+        $this->updateList('effect_set', $list);
+        $list = array();
+        foreach (array_unique((array) $palettes) as $name) {
+            $list[$name] = $name;
+        }
+        $this->updateList('palette_set', $list);
+    }
+
+    /* Les groupes dont cet appareil fait partie. */
+    public function groups() {
+        $groups = array();
+        foreach (self::byType(__CLASS__) as $eqLogic) {
+            if ($eqLogic->isGroup() && in_array((int) $this->getId(), self::parseMembers($eqLogic->getConfiguration('members', array())), true)) {
+                $groups[] = $eqLogic;
+            }
+        }
+        return $groups;
+    }
+
     /* ============================================================ ACTIONS */
 
     /* Commandes qui ne sont pas un geste manuel sur la lumière : elles
      * laissent les scènes en place. */
-    const SCENE_SAFE_ACTIONS = array('refresh', 'scene_start', 'scene_stop', 'scene_stop_all');
+    const SCENE_SAFE_ACTIONS = array('refresh', 'scene_start', 'scene_stop', 'scene_stop_all', 'text_show');
 
     public function runAction($_logicalId, $_options) {
+        if ($this->isGroup()) {
+            return $this->runGroupAction($_logicalId, $_options);
+        }
         if (strpos($_logicalId, 'scene::') === 0) {
             return $this->startScene(substr($_logicalId, 7));
         }
@@ -2206,56 +2609,76 @@ class wledbe extends eqLogic {
                 return $this->stopScenes(false);
             case 'scene_stop_all':
                 return $this->stopScenes(true);
-            case 'on_set':
-                return $this->sendState(array('on' => true));
-            case 'off_set':
-                return $this->sendState(array('on' => false));
+            case 'text_show':
+                return $this->showText(isset($_options['message']) ? $_options['message'] : '', isset($_options['title']) ? $_options['title'] : '');
             case 'toggle':
                 /* « on »:"t" ne se vérifie pas : on lit l'état et on envoie
                  * l'inverse, explicitement. */
-                try {
-                    $state = $this->call('GET', '/json/state');
-                    $on = !empty($state['on']);
-                } catch (Throwable $e) {
-                    $cmd = $this->getCmd('info', 'on');
-                    $on = is_object($cmd) && (int) $cmd->execCmd() === 1;
-                }
-                return $this->sendState(array('on' => !$on));
+                return $this->sendState(array('on' => !$this->isOn(true)));
+        }
+        $fragment = $this->fragmentFor($_logicalId, $_options);
+        return $fragment === null ? true : $this->sendState($fragment);
+    }
+
+    /* L'appareil est-il allumé ? $_fresh : relu sur l'appareil, sinon la
+     * dernière valeur connue. */
+    public function isOn($_fresh) {
+        if ($_fresh) {
+            try {
+                $state = $this->call('GET', '/json/state');
+                return !empty($state['on']);
+            } catch (Throwable $e) {
+            }
+        }
+        $cmd = $this->getCmd('info', 'on');
+        return is_object($cmd) && (int) $cmd->execCmd() === 1;
+    }
+
+    /* L'ordre WLED d'une commande simple, pour cet appareil. Commun à
+     * l'équipement et aux groupes : un effet ou une palette désignés par leur
+     * nom sont résolus appareil par appareil. null : rien à envoyer. */
+    public function fragmentFor($_logicalId, $_options) {
+        switch ($_logicalId) {
+            case 'on_set':
+                return array('on' => true);
+            case 'off_set':
+                return array('on' => false);
             case 'brightness_set':
                 $pct = max(0, min(100, (int) (isset($_options['slider']) ? $_options['slider'] : 100)));
                 if ($pct === 0) {
-                    return $this->sendState(array('on' => false));
+                    return array('on' => false);
                 }
-                return $this->sendState(array('on' => true, 'bri' => max(1, (int) round($pct * 2.55))));
+                return array('on' => true, 'bri' => max(1, (int) round($pct * 2.55)));
             case 'color_set':
                 $color = self::hexToColor(isset($_options['color']) ? $_options['color'] : '');
-                return $this->sendState(array('on' => true, 'seg' => array('col' => array($color))));
+                return array('on' => true, 'seg' => array('col' => array($color)));
             case 'effect_set':
-                return $this->sendState(array('on' => true, 'seg' => array('fx' => $this->resolveEffect($_options))));
+                return array('on' => true, 'seg' => array('fx' => $this->resolveEffect($_options)));
             case 'palette_set':
-                $pal = isset($_options['select']) ? $_options['select'] : '';
-                if (!is_numeric($pal)) {
-                    throw new Exception(__('Palette illisible :', __FILE__) . ' ' . $pal);
+                $pal = isset($_options['select']) ? trim((string) $_options['select']) : '';
+                $id = is_numeric($pal) ? (int) $pal : $this->paletteIdByName($pal);
+                if ($id === null || $pal === '') {
+                    throw new Exception(sprintf(__('Palette inconnue sur ce WLED : %s', __FILE__), $pal));
                 }
-                return $this->sendState(array('seg' => array('pal' => (int) $pal)));
+                return array('seg' => array('pal' => $id));
             case 'speed_set':
             case 'intensity_set':
                 $value = max(0, min(255, (int) (isset($_options['slider']) ? $_options['slider'] : 128)));
-                return $this->sendState(array('seg' => array($_logicalId === 'speed_set' ? 'sx' : 'ix' => $value)));
+                return array('seg' => array($_logicalId === 'speed_set' ? 'sx' : 'ix' => $value));
             case 'preset_set':
                 $ps = isset($_options['select']) ? $_options['select'] : '';
                 if (!is_numeric($ps) || (int) $ps <= 0) {
                     throw new Exception(__('Preset illisible :', __FILE__) . ' ' . $ps);
                 }
-                return $this->sendState(array('ps' => (int) $ps));
+                return array('ps' => (int) $ps);
             case 'json_set':
                 $fragment = json_decode(isset($_options['message']) ? (string) $_options['message'] : '', true);
                 if (!is_array($fragment) || empty($fragment)) {
                     throw new Exception(__('JSON illisible : attendu un objet comme {"on":true,"seg":{"fx":1}}.', __FILE__));
                 }
-                return $this->sendState($fragment);
+                return $fragment;
         }
-        return true;
+        return null;
     }
 
     /* L'effet vient d'une liste (numéro) ou d'un scénario, qui peut aussi le
@@ -2283,6 +2706,10 @@ class wledbe extends eqLogic {
      */
     public function createCommands() {
         if ($this->getId() == '') {
+            return;
+        }
+        if ($this->isGroup()) {
+            $this->createGroupCommands();
             return;
         }
         $on = $this->addCmdIfMissing('on', 'Etat', 'info', 'binary', array('order' => 1, 'generic' => 'LIGHT_STATE_BOOL'));
@@ -2329,6 +2756,43 @@ class wledbe extends eqLogic {
             'display' => array('title_placeholder' => __('Nom de la scène', __FILE__), 'message_placeholder' => 'durée=30 délai=10 priorité=90')));
         $this->addCmdIfMissing('scene_stop', 'Arrêter la scène en cours', 'action', 'other', array('order' => 201));
         $this->addCmdIfMissing('scene_stop_all', 'Arrêter toutes les scènes', 'action', 'other', array('order' => 202, 'isVisible' => 1));
+        if ($this->isMatrix()) {
+            $this->addTextCommand();
+        }
+        $this->syncSceneCommands(self::scenes());
+    }
+
+    private function addTextCommand() {
+        $this->addCmdIfMissing('text_show', 'Afficher un texte', 'action', 'message', array('order' => 210,
+            'display' => array('title_placeholder' => 'couleur=rouge durée=30 vitesse=200',
+                               'message_placeholder' => __('Texte à faire défiler (32 caractères au plus)', __FILE__))));
+    }
+
+    /* Un groupe n'a pas d'état propre à relire : seulement ce qui se déduit
+     * de ses membres, et les commandes qu'il leur transmet. */
+    private function createGroupCommands() {
+        $on = $this->addCmdIfMissing('on', 'Etat', 'info', 'binary', array('order' => 1, 'generic' => 'LIGHT_STATE_BOOL'));
+        $this->addCmdIfMissing('members_online', 'Membres en ligne', 'info', 'string', array('order' => 2, 'isVisible' => 1));
+        $this->addCmdIfMissing('verify_ok', 'Vérification', 'info', 'binary', array('order' => 3));
+        $this->addCmdIfMissing('verify_detail', 'Dernière vérification', 'info', 'string', array('order' => 4));
+        $this->addCmdIfMissing('on_set', 'Allumer', 'action', 'other', array('order' => 100, 'isVisible' => 1, 'generic' => 'LIGHT_ON', 'value' => $on));
+        $this->addCmdIfMissing('off_set', 'Éteindre', 'action', 'other', array('order' => 101, 'isVisible' => 1, 'generic' => 'LIGHT_OFF', 'value' => $on));
+        $this->addCmdIfMissing('toggle', 'Basculer', 'action', 'other', array('order' => 102, 'generic' => 'LIGHT_TOGGLE', 'value' => $on));
+        $this->addCmdIfMissing('brightness_set', 'Régler la luminosité', 'action', 'slider', array(
+            'order' => 103, 'isVisible' => 1, 'generic' => 'LIGHT_SLIDER', 'min' => 0, 'max' => 100));
+        $this->addCmdIfMissing('color_set', 'Régler la couleur', 'action', 'color', array('order' => 104, 'isVisible' => 1, 'generic' => 'LIGHT_SET_COLOR'));
+        $this->addCmdIfMissing('effect_set', 'Choisir un effet', 'action', 'select', array('order' => 105, 'isVisible' => 1, 'generic' => 'LIGHT_MODE'));
+        $this->addCmdIfMissing('palette_set', 'Choisir une palette', 'action', 'select', array('order' => 106));
+        $this->addCmdIfMissing('speed_set', 'Régler la vitesse', 'action', 'slider', array('order' => 107, 'min' => 0, 'max' => 255));
+        $this->addCmdIfMissing('intensity_set', 'Régler l\'intensité', 'action', 'slider', array('order' => 108, 'min' => 0, 'max' => 255));
+        $this->addCmdIfMissing('json_set', 'Envoyer un état JSON', 'action', 'message', array('order' => 110,
+            'display' => array('title_disable' => 1, 'message_placeholder' => '{"on":true,"seg":{"fx":1}}')));
+        $this->addCmdIfMissing('refresh', 'Rafraîchir', 'action', 'other', array('order' => 120, 'isVisible' => 1));
+        $this->addCmdIfMissing('scene_start', 'Lancer une scène', 'action', 'message', array('order' => 200,
+            'display' => array('title_placeholder' => __('Nom de la scène', __FILE__), 'message_placeholder' => 'durée=30 délai=10 priorité=90')));
+        $this->addCmdIfMissing('scene_stop', 'Arrêter la scène en cours', 'action', 'other', array('order' => 201));
+        $this->addCmdIfMissing('scene_stop_all', 'Arrêter toutes les scènes', 'action', 'other', array('order' => 202, 'isVisible' => 1));
+        $this->addTextCommand();
         $this->syncSceneCommands(self::scenes());
     }
 
@@ -2437,6 +2901,16 @@ class wledbe extends eqLogic {
         foreach ($_values as $logicalId => $value) {
             $this->publishCmd($logicalId, $value);
         }
+        /* Un membre qui s'allume ou s'éteint change l'état de ses groupes. */
+        if (isset($_values['on']) && !$this->isGroup()) {
+            $seen = $_values['on'] ? 'on' : 'off';
+            if ($this->getCache('group_on_seen', '') !== $seen) {
+                $this->setCache('group_on_seen', $seen);
+                foreach ($this->groups() as $group) {
+                    $group->refreshGroup();
+                }
+            }
+        }
     }
 
     /* Écriture d'une valeur. Ce nom, et surtout pas setCmd() : utils::a2o()
@@ -2476,9 +2950,28 @@ class wledbe extends eqLogic {
         $this->publishCmd('online', 1);
     }
 
+    /* Le démon dit à chaque relecture du planning quels appareils lui sont
+     * connectés en direct ; la valeur vieillit avec lui. */
+    public function isLive() {
+        $live = cache::byKey('wledbe::live')->getValue(array());
+        return is_array($live) && isset($live['at'], $live['eqs']) && time() - (int) $live['at'] < 150
+            && in_array((int) $this->getId(), (array) $live['eqs'], true);
+    }
+
     public function toAjax() {
+        if ($this->isGroup()) {
+            $members = array();
+            foreach ($this->members() as $m) {
+                $cmd = $m->getCmd('info', 'online');
+                $members[] = array('name' => $m->getHumanName(), 'online' => is_object($cmd) && (int) $cmd->execCmd() === 1,
+                                   'on' => $m->isOn(false), 'matrix' => $m->isMatrix());
+            }
+            return array('id' => $this->getId(), 'group' => true, 'members' => $members);
+        }
         return array(
             'id'        => $this->getId(),
+            'group'     => false,
+            'live'      => $this->isLive(),
             'online'    => (int) $this->getCache('failures', 0) === 0 && $this->getCache('raw_at', '') !== '',
             'failures'  => (int) $this->getCache('failures', 0),
             'problem'   => (string) $this->getCache('problem', ''),

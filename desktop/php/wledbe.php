@@ -21,6 +21,11 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<br>
 				<span>{{Ajouter par adresse IP}}</span>
 			</div>
+			<div class="cursor logoSecondary" id="bt_wledbeAddGroup">
+				<i class="fas fa-object-group"></i>
+				<br>
+				<span>{{Nouveau groupe}}</span>
+			</div>
 			<div class="cursor logoSecondary" id="bt_wledbeScenes">
 				<i class="fas fa-theater-masks"></i>
 				<br>
@@ -76,8 +81,10 @@ $eqLogics = eqLogic::byType($plugin->getId());
 		echo '<a class="btn roundedRight hidden" id="bt_pluginDisplayAsTable" data-coreSupport="1" data-state="0"><i class="fas fa-grip-lines"></i></a>';
 		echo '</div>';
 		echo '</div>';
+		$devices = array_filter($eqLogics, function ($e) { return !$e->isGroup(); });
+		$groups = array_filter($eqLogics, function ($e) { return $e->isGroup(); });
 		echo '<div class="eqLogicThumbnailContainer">';
-		foreach ($eqLogics as $eqLogic) {
+		foreach ($devices as $eqLogic) {
 			$opacity = ($eqLogic->getIsEnable()) ? '' : 'disableCard';
 			$matrix = $eqLogic->getConfiguration('layout', 'strip') === 'matrix';
 			echo '<div class="eqLogicDisplayCard cursor ' . $opacity . '" data-eqLogic_id="' . $eqLogic->getId() . '">';
@@ -89,6 +96,24 @@ $eqLogics = eqLogic::byType($plugin->getId());
 			echo '<span class="label label-default">' . htmlspecialchars((string) $eqLogic->getConfiguration('ip', '')) . '</span> ';
 			echo ($eqLogic->getIsVisible() == 1) ? '<i class="fas fa-eye" title="{{Equipement visible}}"></i>' : '<i class="fas fa-eye-slash" title="{{Equipement non visible}}"></i>';
 			echo '</span>';
+			echo '</div>';
+		}
+		echo '</div>';
+		if (count($groups) > 0) {
+			echo '<legend><i class="fas fa-object-group"></i> {{Mes groupes}}</legend>';
+			echo '<div class="eqLogicThumbnailContainer">';
+			foreach ($groups as $eqLogic) {
+				$opacity = ($eqLogic->getIsEnable()) ? '' : 'disableCard';
+				echo '<div class="eqLogicDisplayCard cursor ' . $opacity . '" data-eqLogic_id="' . $eqLogic->getId() . '">';
+				echo '<i class="fas fa-object-group" style="font-size:4em;"></i>';
+				echo '<br>';
+				echo '<span class="name">' . $eqLogic->getHumanName(true, true) . '</span>';
+				echo '<span class="hiddenAsCard displayTableRight hidden">';
+				echo '<span class="label label-info">{{Groupe}} · ' . count(wledbe::parseMembers($eqLogic->getConfiguration('members', array()))) . ' {{membre(s)}}</span> ';
+				echo ($eqLogic->getIsVisible() == 1) ? '<i class="fas fa-eye" title="{{Equipement visible}}"></i>' : '<i class="fas fa-eye-slash" title="{{Equipement non visible}}"></i>';
+				echo '</span>';
+				echo '</div>';
+			}
 			echo '</div>';
 		}
 		echo '</div>';
@@ -168,7 +193,32 @@ $eqLogics = eqLogic::byType($plugin->getId());
 
 				<div class="col-lg-6">
 					<form class="form-horizontal">
-						<fieldset>
+						<fieldset class="wledbeGroupOnly" style="display:none;">
+							<legend><i class="fas fa-object-group"></i> {{Membres du groupe}}</legend>
+							<input type="hidden" class="eqLogicAttr" data-l1key="configuration" data-l2key="members" id="in_wledbeMembers">
+							<div class="form-group">
+								<div class="col-sm-12">
+									<?php
+									$wledbeDevices = array_filter($eqLogics, function ($e) { return !$e->isGroup(); });
+									if (count($wledbeDevices) === 0) {
+										echo '<div class="alert alert-warning">{{Aucun WLED à regrouper : créez d\'abord vos appareils.}}</div>';
+									}
+									foreach ($wledbeDevices as $device) {
+										echo '<div class="checkbox"><label>';
+										echo '<input type="checkbox" class="wledbeMember" data-id="' . $device->getId() . '"> ';
+										echo $device->getHumanName(true, true);
+										echo ' <span class="label label-info">' . ($device->isMatrix() ? '{{matrice}}' : '{{bande}}') . '</span>';
+										if (!$device->getIsEnable()) {
+											echo ' <span class="label label-default">{{désactivé}}</span>';
+										}
+										echo '</label></div>';
+									}
+									?>
+									<span class="help-block">{{Un ordre donné au groupe part vers tous ses membres en même temps. Chaque membre garde sa vérification et ses propres scènes. « Choisir un effet » ne propose que les effets que tous les membres connaissent.}}</span>
+								</div>
+							</div>
+						</fieldset>
+						<fieldset class="wledbeDeviceOnly">
 							<legend><i class="fas fa-plug"></i> {{Appareil}}</legend>
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Adresse IP}}</label>
@@ -235,11 +285,14 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<br>
 				<div class="col-xs-12">
 					<div class="alert alert-info" id="div_wledbeState">{{Chargement…}}</div>
+					<div id="div_wledbeMembers"></div>
+					<div class="wledbeDeviceOnly">
 					<legend><i class="fas fa-theater-masks"></i> {{Scènes sur cet appareil}}</legend>
 					<div id="div_wledbeStack"></div>
 					<legend><i class="fas fa-code"></i> {{Dernière réponse de l'appareil}}</legend>
 					<span class="help-block">{{Le JSON de /json/si tel que WLED l'a renvoyé. C'est la pièce à joindre en cas de valeur douteuse.}}</span>
 					<pre id="pre_wledbeRaw" style="max-height:520px;overflow:auto;"></pre>
+					</div>
 				</div>
 			</div>
 

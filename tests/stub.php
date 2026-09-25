@@ -116,6 +116,11 @@ class cmd {
         return isset($this->configuration[$_key]) ? $this->configuration[$_key] : $_default;
     }
     public function getEqLogic() { return null; }
+    /* La dernière valeur publiée par l'équipement pour cette commande. */
+    public function execCmd($_options = null) {
+        $eq = isset(eqLogic::$instances[$this->eqLogic_id]) ? eqLogic::$instances[$this->eqLogic_id] : null;
+        return ($eq !== null && isset($eq->published[$this->logicalId])) ? $eq->published[$this->logicalId] : '';
+    }
 
     public function setEqLogic_id($_v) { $this->eqLogic_id = $_v; return $this; }
     public function setLogicalId($_v) { $this->logicalId = $_v; return $this; }
@@ -202,7 +207,10 @@ class eqLogic {
         return null;
     }
 
+    public static $instances = array();
+
     public function checkAndUpdateCmd($_cmd, $_value, $_when = null) {
+        self::$instances[$this->id] = $this;
         $id = is_object($_cmd) ? $_cmd->getLogicalId() : $_cmd;
         $this->published[$id] = $_value;
         $this->events++;

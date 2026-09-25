@@ -79,7 +79,11 @@ try {
     if (init('action') == 'refresh') {
         unautorizedInDemo();
         $eqLogic = wledbeEq();
-        $eqLogic->pollNow();
+        if ($eqLogic->isGroup()) {
+            $eqLogic->refreshGroup();
+        } else {
+            $eqLogic->pollNow();
+        }
         ajax::success($eqLogic->toAjax());
     }
 
@@ -99,6 +103,9 @@ try {
         $effects = array();
         $palettes = array();
         foreach (wledbe::byType('wledbe', true) as $eqLogic) {
+            if ($eqLogic->isGroup()) {
+                continue;
+            }
             $devices[] = array('id' => $eqLogic->getId(), 'name' => $eqLogic->getHumanName(), 'matrix' => $eqLogic->isMatrix());
             foreach ((array) $eqLogic->getCache('fx_names', array()) as $name) {
                 if ($name !== 'RSVD' && $name !== '-') {
@@ -143,6 +150,11 @@ try {
     if (init('action') == 'stopScenes') {
         unautorizedInDemo();
         ajax::success(wledbeEq()->stopScenes(true));
+    }
+
+    if (init('action') == 'createGroup') {
+        unautorizedInDemo();
+        ajax::success(array('id' => wledbe::createGroup(init('name'))->getId()));
     }
 
     /* Lit le cache, n'interroge jamais l'appareil. */

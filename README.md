@@ -18,6 +18,10 @@ cloud ni broker MQTT.
   rendu tel quel. Recettes distinctes pour bande et matrice (texte défilant),
   pile de priorités, garde qui réimpose une alarme défaite. Un petit démon PHP
   les réveille à la seconde près.
+- **Groupes** : plusieurs WLED pilotés d'un seul ordre, en parallèle.
+- **Texte défilant** sur les matrices, avec couleur et durée.
+- **État instantané** : le démon garde une connexion WebSocket avec chaque
+  WLED, l'état suit en une à deux secondes.
 - **Listes lues sur l'appareil** : les numéros d'effets changent d'une version
   de WLED à l'autre ; le plugin relit les listes à chaque changement de version
   et écarte les effets 2D sur une bande.
