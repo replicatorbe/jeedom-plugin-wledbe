@@ -318,7 +318,7 @@ $strip->setCache('fx_names', $eff);
 $strip->setCache('pal_names', $pal);
 $frag = $strip->sceneFragment(wledbe::findScene('police'), $si['state']);
 check('Police : effet résolu par son nom', $frag['seg'][0]['fx'], 50);
-check('Police : rouge puis bleu', $frag['seg'][0]['col'], array(array(255, 0, 0), array(0, 0, 255), array(0, 0, 0)));
+check('Police : faisceaux bleus sur fond noir', $frag['seg'][0]['col'], array(array(0, 0, 255), array(0, 0, 0), array(0, 0, 0)));
 check('sans fondu', $frag['tt'], 0);
 check('tous les segments visés, par id', $frag['seg'][0]['id'], 0);
 check('pas de texte sur une bande', isset($frag['seg'][0]['n']), false);

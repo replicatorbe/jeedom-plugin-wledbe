@@ -1431,10 +1431,12 @@ class wledbe extends eqLogic {
               'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#ff3000', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'FEU')),
         array('id' => 'police', 'name' => 'Police', 'priority' => 90, 'duration' => 120, 'end' => 'restore', 'guard' => 0,
               /* « Two Dots » est l'ancien effet « Police » de WLED, retiré sous
-               * ce nom en 0.14 : deux points de couleurs franches qui se
-               * poursuivent. « Chase 2 » passait par la palette et mélangeait
-               * le rouge et le bleu en mauve. */
-              'strip' => array('effect' => 'Two Dots', 'colors' => array('#ff0000', '#0000ff', '#000000'), 'brightness' => 100, 'speed' => 255, 'intensity' => 128)),
+               * ce nom en 0.13 : deux faisceaux qui tournent. Quand la couleur 2
+               * est celle du fond, WLED donne aux deux faisceaux la couleur 1 :
+               * ici deux faisceaux bleus sur fond noir, comme un gyrophare
+               * belge, presque sans rouge. (« Police All », rouge et bleu,
+               * c'est « Two Dots » rouge/bleu à intensité 255.) */
+              'strip' => array('effect' => 'Two Dots', 'colors' => array('#0000ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 240, 'intensity' => 128)),
         array('id' => 'fuite', 'name' => 'Fuite d\'eau', 'priority' => 80, 'duration' => 300, 'end' => 'restore', 'guard' => 1,
               'strip' => array('effect' => 'Running', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128),
               'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'FUITE')),
