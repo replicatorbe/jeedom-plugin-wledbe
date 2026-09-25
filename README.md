@@ -13,6 +13,11 @@ cloud ni broker MQTT.
 - **Ordres vérifiés** : le plugin relit l'état que WLED a réellement appliqué,
   relance un ordre perdu, et signale un échec définitif (commande
   « Vérification », centre de messages).
+- **Scènes** : alarme, incendie, police, fuite d'eau, sonnette, notification…
+  Un effet joué pendant une durée, avec une priorité, puis l'éclairage d'avant
+  rendu tel quel. Recettes distinctes pour bande et matrice (texte défilant),
+  pile de priorités, garde qui réimpose une alarme défaite. Un petit démon PHP
+  les réveille à la seconde près.
 - **Listes lues sur l'appareil** : les numéros d'effets changent d'une version
   de WLED à l'autre ; le plugin relit les listes à chaque changement de version
   et écarte les effets 2D sur une bande.

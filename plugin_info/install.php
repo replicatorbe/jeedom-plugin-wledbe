@@ -18,6 +18,8 @@
 require_once __DIR__ . '/../../../core/php/core.inc.php';
 
 function wledbe_install() {
+    /* Le point d'entrée du démon ne parle qu'à un processus local. */
+    config::save('api::wledbe::mode', 'localhost', 'core');
 }
 
 /* Exécutée dans la requête HTTP de la page des plugins : rien de lent ici,
@@ -25,6 +27,7 @@ function wledbe_install() {
  * prochain relevé ; on ne fait que rattraper les commandes. */
 function wledbe_update() {
     try {
+        config::save('api::wledbe::mode', 'localhost', 'core');
         wledbe::rebuildCommands();
     } catch (Throwable $e) {
         log::add('wledbe', 'error', __('Mise à jour du plugin :', __FILE__) . ' ' . $e->getMessage());
@@ -33,4 +36,9 @@ function wledbe_update() {
 
 /* Appelée aussi à la simple désactivation du plugin : ne rien y détruire. */
 function wledbe_remove() {
+    try {
+        wledbe::deamon_stop();
+    } catch (Throwable $e) {
+        log::add('wledbe', 'error', __('Arrêt du démon :', __FILE__) . ' ' . $e->getMessage());
+    }
 }

@@ -28,6 +28,21 @@ class config {
         $k = $_plugin . '::' . $_key;
         return isset(self::$values[$k]) ? self::$values[$k] : $_default;
     }
+    public static function save($_key, $_value, $_plugin = 'core') {
+        self::$values[$_plugin . '::' . $_key] = $_value;
+    }
+}
+
+/* Dossier temporaire du plugin : verrous de la pile et fichier témoin du
+ * démon. */
+class jeedom {
+    public static function getTmpFolder($_plugin = null) {
+        $dir = sys_get_temp_dir() . '/wledbe-tests-' . getmypid();
+        if (!is_dir($dir)) {
+            mkdir($dir);
+        }
+        return $dir;
+    }
 }
 
 class message {
@@ -110,11 +125,15 @@ class cmd {
             }
         }
         if ($this->id === '') {
-            $this->id = count(self::$table) + 1;
+            $this->id = max(array_merge(array(0), array_keys(self::$table))) + 1;
             self::$table[$this->id] = $this;
         }
         self::$saves++;
         return true;
+    }
+
+    public function remove() {
+        unset(self::$table[$this->id]);
     }
 
     public static function byEqLogicIdCmdName($_eqLogic_id, $_name) {
@@ -150,6 +169,15 @@ class eqLogic {
      * stub : c'est ce qui permet de vérifier que publishCmd() ignore sans
      * broncher une commande absente. */
     public function getCmd($_type = null, $_logicalId = null) {
+        if ($_logicalId === null) {
+            $list = array();
+            foreach (cmd::$table as $cmd) {
+                if ($cmd->eqLogic_id == $this->id && ($_type === null || $cmd->type === $_type)) {
+                    $list[] = $cmd;
+                }
+            }
+            return $list;
+        }
         foreach (cmd::$table as $cmd) {
             if ($cmd->eqLogic_id == $this->id && $cmd->type === $_type && $cmd->logicalId === $_logicalId) {
                 return $cmd;

@@ -4,9 +4,13 @@ Ce plugin pilote en réseau local les contrôleurs [WLED](https://kno.wled.ge),
 qu'ils animent une bande LED ou une matrice. Il parle directement à l'API JSON
 de chaque appareil : ni cloud, ni compte, ni broker MQTT.
 
-Il vise un défaut de WLED : un ordre envoyé à un contrôleur au Wi-Fi fragile
-peut se perdre sans que rien ne le signale. Le plugin **vérifie donc chaque
-ordre** et le relance si besoin.
+Il comble deux manques de WLED :
+
+- un ordre envoyé à un contrôleur au Wi-Fi fragile peut se perdre sans que rien
+  ne le signale : le plugin **vérifie chaque ordre** et le relance si besoin ;
+- WLED sait jouer un effet, pas « flasher en rouge pendant cinq minutes puis
+  revenir comme avant » : le plugin ajoute des **scènes** (alarme, police,
+  sonnette…) avec durée, priorité et restauration.
 
 ## Ajouter ses WLED
 
@@ -112,6 +116,106 @@ Exemple : prévenir quand la lampe d'alarme n'a pas réagi.
 SI #[Salon][Meuble][Vérification]# == 0
 ALORS envoyer une notification « La lampe d'alarme ne répond pas »
 ```
+
+## Les scènes
+
+Une scène, c'est ce que WLED ne sait pas faire seul : **un effet choisi pour une
+situation**, joué pendant une durée donnée, avec une priorité, puis
+**l'éclairage d'avant rendu tel quel**. Une alarme fait flasher la bande, puis
+la lampe revient exactement comme elle était, allumée ou éteinte, avec sa
+couleur et son effet.
+
+### La bibliothèque
+
+Plugins → Objets connectés → WLED → **Scènes**. La bibliothèque est commune à
+tous vos WLED. Elle est livrée avec six scènes, toutes modifiables :
+
+| Scène | Bande | Matrice | Priorité | Durée | Garde |
+|---|---|---|---|---|---|
+| Alarme intrusion | Strobe Mega rouge et blanc | texte « ALARME » | 100 | 5 min | oui |
+| Incendie | Strobe orange | texte « FEU » | 100 | 5 min | oui |
+| Police | Chase 2 rouge et bleu | recette bande | 90 | 2 min | non |
+| Fuite d'eau | Running bleu | texte « FUITE » | 80 | 5 min | oui |
+| Sonnette | Blink blanc | recette bande | 40 | 10 s | non |
+| Notification | Breathe bleu clair | recette bande | 20 | 15 s | non |
+
+Pour chaque scène :
+
+- **Priorité** (0 à 100) : une scène plus prioritaire recouvre les autres.
+- **Durée** en secondes ; 0 pour une scène sans fin, qui dure jusqu'à
+  « Arrêter ».
+- **Ensuite** : rendre l'éclairage d'avant, éteindre, ou laisser la scène.
+- **Sous garde** : la scène est relue toutes les dix secondes et réimposée si
+  quelqu'un l'a défaite (bouton de l'appareil, redémarrage, autre système).
+- **Recettes** : une pour les bandes et, facultativement, une pour les
+  matrices. Effet et palette se choisissent par leur nom, parmi ceux de vos
+  WLED ; trois couleurs, luminosité, vitesse, intensité. Sur une matrice, le
+  **texte défilant** s'affiche avec l'effet « Scrolling Text ». Le **JSON
+  avancé** complète l'ordre pour tout le reste, par exemple
+  `{"seg":{"c1":200}}` ou `{"lor":1}` pour passer outre un flux temps réel.
+
+**Essayer** enregistre la bibliothèque et joue la scène sur le WLED choisi,
+pendant la durée indiquée ; **Arrêter l'essai** rend l'éclairage.
+
+Les effets sont désignés par leur nom et retrouvés sur chaque appareil au
+moment de jouer : la même scène marche sur un WLED 0.14 et sur un 16.0. Si
+l'effet n'existe pas sur un appareil, la commande échoue avec un message qui
+le dit.
+
+### Lancer une scène
+
+Chaque équipement reçoit :
+
+| Commande | Rôle |
+|---|---|
+| Scène Police, Scène Sonnette… | une par scène, avec ses réglages par défaut |
+| Lancer une scène | nom de la scène en **titre**, options en **message** |
+| Arrêter la scène en cours | la suivante reprend la main, ou l'éclairage revient |
+| Arrêter toutes les scènes | vide la pile et rend l'éclairage d'avant |
+| Scène en cours, Scène active, Fin de la scène | infos |
+
+Les options de « Lancer une scène », séparées par des espaces :
+
+| Option | Exemple | Effet |
+|---|---|---|
+| durée | `durée=30`, `durée=5m`, `durée=1h`, `durée=0`, ou `30` seul | remplace la durée par défaut ; 0 = sans fin |
+| délai | `délai=10`, `délai=2m` | attend avant de lancer |
+| heure | `heure=22:30` | lance à cette heure (demain si elle est passée) |
+| priorité | `priorité=95` | remplace la priorité |
+| fin | `fin=restaurer`, `fin=éteindre`, `fin=garder` | remplace le comportement de fin |
+
+Exemple, dans le scénario d'alarme :
+
+```
+[Salon][Meuble][Lancer une scène]   titre : Alarme intrusion   message : durée=10m
+```
+
+### Plusieurs scènes à la fois
+
+Chaque appareil tient une **pile** : la scène affichée est la plus prioritaire,
+la plus récente à priorité égale. Si la sonnette sonne pendant l'alarme, elle
+attend dessous ; si l'alarme arrive pendant la sonnette, elle prend la main, et
+la sonnette reprend si elle n'est pas finie. Quand la dernière scène se
+termine, l'éclairage d'avant la **première** revient.
+
+Relancer une scène déjà en cours la prolonge : sa durée repart de zéro.
+
+Une **commande manuelle** (allumer, éteindre, couleur, effet…) pendant une
+scène abandonne toutes les scènes sans rien restaurer : l'utilisateur a repris
+la main, éteindre la lampe pendant la sonnette doit la laisser éteinte.
+
+L'onglet **Diagnostic** de l'équipement montre la pile : scène affichée,
+scènes recouvertes, scènes programmées.
+
+### Le démon
+
+Le démon du plugin réveille les scènes à la seconde près : fin de durée,
+départ différé, garde. Il ne parle jamais aux WLED lui-même. S'il est arrêté,
+le cron de Jeedom prend le relais, une fois par minute : une scène ne reste
+jamais allumée faute de démon, elle s'arrête simplement moins précisément.
+
+Si un WLED ne répond pas au moment de rendre l'éclairage, la restauration est
+retentée toutes les 30 secondes.
 
 ## Configuration du plugin
 

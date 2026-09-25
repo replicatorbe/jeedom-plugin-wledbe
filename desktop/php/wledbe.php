@@ -21,11 +21,40 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<br>
 				<span>{{Ajouter par adresse IP}}</span>
 			</div>
+			<div class="cursor logoSecondary" id="bt_wledbeScenes">
+				<i class="fas fa-theater-masks"></i>
+				<br>
+				<span>{{Scènes}}</span>
+			</div>
 			<div class="cursor eqLogicAction logoSecondary" data-action="gotoPluginConf">
 				<i class="fas fa-wrench"></i>
 				<br>
 				<span>{{Configuration}}</span>
 			</div>
+		</div>
+
+		<!-- Bibliothèque de scènes : remplie par le JS, cachée jusqu'au clic sur
+		     « Scènes ». Rien ici n'est un eqLogicAttr : elle s'enregistre à part. -->
+		<div id="div_wledbeScenes" style="display:none;">
+			<legend><i class="fas fa-theater-masks"></i> {{Scènes}}</legend>
+			<div class="alert alert-info" style="margin:5px;">
+				{{Une scène joue un effet pendant une durée donnée, avec une priorité, puis rend l'éclairage d'avant. Elle est commune à tous vos WLED ; chacun reçoit une commande « Scène … ». Dans un scénario, la commande « Lancer une scène » accepte le nom en titre et des options en message :}}
+				<code>durée=30</code> <code>durée=5m</code> <code>délai=10</code> <code>heure=22:30</code> <code>priorité=95</code> <code>fin=éteindre</code>.
+				{{Une scène plus prioritaire recouvre les autres ; une scène sous garde est réimposée si quelqu'un la défait. Une commande manuelle (allumer, couleur…) pendant une scène l'abandonne.}}
+			</div>
+			<div class="form-inline" style="margin:5px 5px 10px 5px;">
+				<a class="btn btn-success btn-sm" id="bt_wledbeScenesSave"><i class="fas fa-check-circle"></i> {{Enregistrer les scènes}}</a>
+				<a class="btn btn-default btn-sm" id="bt_wledbeSceneAdd"><i class="fas fa-plus-circle"></i> {{Nouvelle scène}}</a>
+				<a class="btn btn-default btn-sm" id="bt_wledbeScenesReset"><i class="fas fa-undo"></i> {{Scènes d'origine}}</a>
+				<span style="margin-left:20px;">{{Essayer sur}}</span>
+				<select class="form-control input-sm" id="sel_wledbeTestDevice"></select>
+				<span>{{pendant}}</span>
+				<input type="number" class="form-control input-sm" id="in_wledbeTestDuration" value="10" min="1" max="600" style="width:70px;"> s
+				<a class="btn btn-default btn-sm" id="bt_wledbeTestStop"><i class="fas fa-stop"></i> {{Arrêter l'essai}}</a>
+			</div>
+			<div id="div_wledbeSceneList"></div>
+			<datalist id="dl_wledbeEffects"></datalist>
+			<datalist id="dl_wledbePalettes"></datalist>
 		</div>
 
 		<legend><i class="fas fa-lightbulb"></i> {{Mes WLED}}</legend>
@@ -206,6 +235,8 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<br>
 				<div class="col-xs-12">
 					<div class="alert alert-info" id="div_wledbeState">{{Chargement…}}</div>
+					<legend><i class="fas fa-theater-masks"></i> {{Scènes sur cet appareil}}</legend>
+					<div id="div_wledbeStack"></div>
 					<legend><i class="fas fa-code"></i> {{Dernière réponse de l'appareil}}</legend>
 					<span class="help-block">{{Le JSON de /json/si tel que WLED l'a renvoyé. C'est la pièce à joindre en cas de valeur douteuse.}}</span>
 					<pre id="pre_wledbeRaw" style="max-height:520px;overflow:auto;"></pre>

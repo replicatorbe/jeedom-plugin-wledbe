@@ -59,15 +59,38 @@ class wledbe extends eqLogic {
     /* Durée d'écoute du mDNS lors d'une recherche. */
     const MDNS_SECONDS = 5;
 
+    /* Toutes les combien de secondes la garde relit une scène protégée. */
+    const GUARD_EVERY = 10;
+
+    /* Délai entre deux tentatives de restauration d'un appareil qui ne
+     * répondait pas à la fin d'une scène. */
+    const RESTORE_RETRY = 30;
+
     /* Clés d'un ordre qui ne décrivent pas un état : rien à vérifier. */
     const UNVERIFIED_KEYS = array('v', 'transition', 'tt', 'tb', 'time', 'psave', 'pdel', 'rb', 'lor',
                                   'np', 'ib', 'sb', 'o', 'rmcpal', 'playlist', 'pl');
 
     /* ================================================================ CRON */
 
-    /* Relevé de l'état de chaque appareil, une fois par minute. */
+    /* Relevé de l'état de chaque appareil, une fois par minute. Si le démon
+     * est arrêté, le cron fait aussi avancer les scènes, à la minute près :
+     * une scène ne doit jamais rester allumée faute de démon. */
     public static function cron() {
         $deadline = microtime(true) + self::CRON_BUDGET;
+        if (self::deamon_info()['state'] != 'ok') {
+            foreach (self::getSchedule()['timers'] as $timer) {
+                if ($timer['at'] <= time()) {
+                    $eqLogic = self::byId($timer['eq']);
+                    if (is_object($eqLogic)) {
+                        try {
+                            $eqLogic->tick();
+                        } catch (Throwable $e) {
+                            log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
+                        }
+                    }
+                }
+            }
+        }
         $slowTurn = ((int) date('i')) % 5 === 0;
         foreach (self::byType(__CLASS__, true) as $eqLogic) {
             if (microtime(true) > $deadline) {
@@ -115,6 +138,96 @@ class wledbe extends eqLogic {
                 log::add(__CLASS__, 'debug', __('Découverte automatique :', __FILE__) . ' ' . $e->getMessage());
             }
         }
+    }
+
+    /* =============================================================== DÉMON */
+
+    /*
+     * Le démon n'est qu'une minuterie. Il demande au plugin quand le réveiller
+     * (getSchedule()), et le rappelle à l'heure dite ; tout le reste — scènes,
+     * priorités, restauration, garde — se décide ici, dans tick(). Il ne
+     * charge pas le coeur et ne parle jamais à un WLED.
+     */
+    public static function deamon_info() {
+        $return = array('log' => __CLASS__ . 'd', 'state' => 'nok', 'launchable' => 'ok');
+        $pid_file = jeedom::getTmpFolder(__CLASS__) . '/deamon.pid';
+        if (file_exists($pid_file)) {
+            $pid = trim(file_get_contents($pid_file));
+            if ($pid != '' && @posix_getsid((int) $pid)) {
+                $return['state'] = 'ok';
+            } else {
+                @unlink($pid_file);
+            }
+        }
+        return $return;
+    }
+
+    public static function deamon_start() {
+        self::deamon_stop();
+        $daemon = realpath(__DIR__ . '/../../resources/wledbed/wledbed.php');
+        $cmd  = 'php ' . escapeshellarg($daemon);
+        $cmd .= ' --callback ' . escapeshellarg(self::getCallbackUrl());
+        $cmd .= ' --pid ' . escapeshellarg(jeedom::getTmpFolder(__CLASS__) . '/deamon.pid');
+        $cmd .= ' --stamp ' . escapeshellarg(self::stampFile());
+        $cmd .= ' --loglevel ' . escapeshellarg(log::convertLogLevel(log::getLogLevel(__CLASS__)));
+        $cmd .= ' --timezone ' . escapeshellarg(date_default_timezone_get());
+
+        /* La clé API passe par l'entrée standard, jamais en argument : ps est
+         * lisible par n'importe quel utilisateur local. */
+        $full = 'echo ' . escapeshellarg(jeedom::getApiKey(__CLASS__)) . ' | ' . $cmd
+              . ' >> ' . log::getPathToLog(__CLASS__ . 'd') . ' 2>&1 &';
+        log::add(__CLASS__, 'info', __('Lancement du démon', __FILE__));
+        exec($full);
+
+        for ($i = 1; $i <= 20; $i++) {
+            if (self::deamon_info()['state'] == 'ok') {
+                message::removeAll(__CLASS__, 'unableStartDeamon');
+                return true;
+            }
+            sleep(1);
+        }
+        log::add(__CLASS__, 'error', __('Le démon n\'a pas démarré. Consultez le journal', __FILE__) . ' ' . __CLASS__ . 'd.');
+        return false;
+    }
+
+    public static function deamon_stop() {
+        $pid_file = jeedom::getTmpFolder(__CLASS__) . '/deamon.pid';
+        if (file_exists($pid_file)) {
+            $pid = trim(file_get_contents($pid_file));
+            if ($pid != '') {
+                system::kill($pid);
+            }
+            @unlink($pid_file);
+        }
+        system::kill('resources/wledbed/wledbed.php');
+        return true;
+    }
+
+    public static function getCallbackUrl() {
+        return network::getNetworkAccess('internal', 'http:127.0.0.1:port:comp')
+             . '/plugins/wledbe/core/php/jeeWledbe.php';
+    }
+
+    public static function stampFile() {
+        return jeedom::getTmpFolder(__CLASS__) . '/schedule.stamp';
+    }
+
+    /* Le démon relit le planning quand ce fichier change. */
+    public static function notifyDaemon() {
+        @touch(self::stampFile());
+    }
+
+    /* Les prochains réveils, appareil par appareil. Autosuffisant : le démon
+     * ne peut rien relire d'autre. */
+    public static function getSchedule() {
+        $timers = array();
+        foreach (self::byType(__CLASS__, true) as $eqLogic) {
+            $at = $eqLogic->nextWake();
+            if ($at !== null) {
+                $timers[] = array('eq' => (int) $eqLogic->getId(), 'at' => $at, 'name' => $eqLogic->getHumanName());
+            }
+        }
+        return array('timers' => $timers);
     }
 
     /* ======================================================== CYCLE DE VIE */
@@ -819,6 +932,11 @@ class wledbe extends eqLogic {
                 }
                 continue;
             }
+            /* Un « ps » qui désigne une playlist la lance : l'état porte alors
+             * son numéro dans « pl », et dans « ps » celui du preset joué. */
+            if ($key === 'ps' && is_numeric($value) && isset($_state['pl']) && (int) $_state['pl'] === (int) $value) {
+                continue;
+            }
             if (!is_array($_state) || !array_key_exists($key, $_state)) {
                 continue;
             }
@@ -1046,12 +1164,679 @@ class wledbe extends eqLogic {
         message::add(__CLASS__, $this->getHumanName() . ' : ' . $_text, '', 'verify' . $this->getId());
     }
 
+    /* ========================================================= SCÈNES : BIBLIOTHÈQUE */
+
+    /*
+     * Une scène, c'est ce que WLED ne sait pas faire seul : un effet choisi
+     * pour une situation (alarme, police, sonnette…), joué pendant une durée
+     * donnée, avec une priorité, puis l'éclairage d'avant rendu tel quel.
+     *
+     * La bibliothèque est commune à tous les WLED : « Police » est la même
+     * scène sur la bande du salon et sur la matrice du bureau. Chaque scène
+     * porte une recette pour bande et, facultativement, une recette pour
+     * matrice, qui peut y afficher un texte défilant. Les effets et palettes
+     * y sont désignés par leur nom, retrouvé sur chaque appareil au moment de
+     * jouer : un nom survit aux mises à jour de WLED, un numéro non.
+     */
+    const DEFAULT_SCENES = array(
+        array('id' => 'alarme', 'name' => 'Alarme intrusion', 'priority' => 100, 'duration' => 300, 'end' => 'restore', 'guard' => 1,
+              'strip' => array('effect' => 'Strobe Mega', 'colors' => array('#ff0000', '#ffffff', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128),
+              'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#ff0000', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'ALARME')),
+        array('id' => 'incendie', 'name' => 'Incendie', 'priority' => 100, 'duration' => 300, 'end' => 'restore', 'guard' => 1,
+              'strip' => array('effect' => 'Strobe', 'colors' => array('#ff3000', '#000000', '#000000'), 'brightness' => 100, 'speed' => 220, 'intensity' => 128),
+              'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#ff3000', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'FEU')),
+        array('id' => 'police', 'name' => 'Police', 'priority' => 90, 'duration' => 120, 'end' => 'restore', 'guard' => 0,
+              'strip' => array('effect' => 'Chase 2', 'colors' => array('#ff0000', '#0000ff', '#000000'), 'brightness' => 100, 'speed' => 230, 'intensity' => 128)),
+        array('id' => 'fuite', 'name' => 'Fuite d\'eau', 'priority' => 80, 'duration' => 300, 'end' => 'restore', 'guard' => 1,
+              'strip' => array('effect' => 'Running', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128),
+              'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array('#0040ff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 200, 'intensity' => 128, 'text' => 'FUITE')),
+        array('id' => 'sonnette', 'name' => 'Sonnette', 'priority' => 40, 'duration' => 10, 'end' => 'restore', 'guard' => 0,
+              'strip' => array('effect' => 'Blink', 'colors' => array('#ffffff', '#000000', '#000000'), 'brightness' => 100, 'speed' => 230, 'intensity' => 128)),
+        array('id' => 'notification', 'name' => 'Notification', 'priority' => 20, 'duration' => 15, 'end' => 'restore', 'guard' => 0,
+              'strip' => array('effect' => 'Breathe', 'colors' => array('#00a0ff', '#000000', '#000000'), 'brightness' => 80, 'speed' => 128, 'intensity' => 128)),
+    );
+
+    const END_MODES = array('restore', 'off', 'keep');
+
+    /* La bibliothèque, telle qu'enregistrée, ou celle livrée avec le plugin
+     * tant que l'utilisateur n'y a pas touché. */
+    public static function scenes() {
+        $scenes = config::byKey('scenes', __CLASS__, '');
+        if (is_string($scenes) && $scenes !== '') {
+            $scenes = json_decode($scenes, true);
+        }
+        if (!is_array($scenes) || empty($scenes)) {
+            $scenes = self::DEFAULT_SCENES;
+        }
+        return array_values(array_map(array(__CLASS__, 'normalizeScene'), $scenes));
+    }
+
+    public static function normalizeRecipe($_recipe, $_isMatrix) {
+        $r = is_array($_recipe) ? $_recipe : array();
+        $colors = array();
+        foreach (array(0, 1, 2) as $i) {
+            $c = isset($r['colors'][$i]) ? strtolower(trim((string) $r['colors'][$i])) : '';
+            $colors[] = preg_match('/^#[0-9a-f]{6}$/', $c) ? $c : ($i === 0 ? '#ffffff' : '#000000');
+        }
+        $recipe = array(
+            'effect'     => isset($r['effect']) ? trim((string) $r['effect']) : 'Solid',
+            'colors'     => $colors,
+            'palette'    => isset($r['palette']) ? trim((string) $r['palette']) : '',
+            'brightness' => max(1, min(100, isset($r['brightness']) ? (int) $r['brightness'] : 100)),
+            'speed'      => max(0, min(255, isset($r['speed']) ? (int) $r['speed'] : 128)),
+            'intensity'  => max(0, min(255, isset($r['intensity']) ? (int) $r['intensity'] : 128)),
+            'text'       => isset($r['text']) ? mb_substr(trim((string) $r['text']), 0, 64) : '',
+            'json'       => isset($r['json']) ? trim((string) $r['json']) : '',
+        );
+        if ($recipe['effect'] === '') {
+            $recipe['effect'] = 'Solid';
+        }
+        if ($_isMatrix) {
+            $recipe = array('enabled' => !empty($r['enabled']) ? 1 : 0) + $recipe;
+        }
+        return $recipe;
+    }
+
+    public static function normalizeScene($_scene) {
+        $s = is_array($_scene) ? $_scene : array();
+        $name = isset($s['name']) ? trim((string) $s['name']) : '';
+        $id = isset($s['id']) ? preg_replace('/[^a-z0-9_]/', '', strtolower((string) $s['id'])) : '';
+        if ($id === '') {
+            $id = self::slug($name !== '' ? $name : 'scene');
+        }
+        $end = isset($s['end']) && in_array($s['end'], self::END_MODES, true) ? $s['end'] : 'restore';
+        return array(
+            'id'       => $id,
+            'name'     => $name !== '' ? $name : $id,
+            'priority' => max(0, min(100, isset($s['priority']) ? (int) $s['priority'] : 50)),
+            'duration' => max(0, min(86400, isset($s['duration']) ? (int) $s['duration'] : 60)),
+            'end'      => $end,
+            'guard'    => !empty($s['guard']) ? 1 : 0,
+            'strip'    => self::normalizeRecipe(isset($s['strip']) ? $s['strip'] : array(), false),
+            'matrix'   => self::normalizeRecipe(isset($s['matrix']) ? $s['matrix'] : array(), true),
+        );
+    }
+
+    public static function slug($_text) {
+        $text = strtolower(trim((string) $_text));
+        $text = strtr($text, array('à' => 'a', 'â' => 'a', 'ä' => 'a', 'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e',
+                                   'î' => 'i', 'ï' => 'i', 'ô' => 'o', 'ö' => 'o', 'ù' => 'u', 'û' => 'u', 'ü' => 'u', 'ç' => 'c'));
+        $text = trim(preg_replace('/[^a-z0-9]+/', '_', $text), '_');
+        return $text !== '' ? substr($text, 0, 32) : 'scene';
+    }
+
+    /*
+     * Enregistre la bibliothèque. Les identifiants restent stables d'un
+     * enregistrement à l'autre : ils nomment les commandes « Scène … » des
+     * équipements, que des scénarios appellent. Deux scènes ne peuvent porter
+     * ni le même identifiant ni le même nom.
+     */
+    public static function saveScenes($_scenes) {
+        if (!is_array($_scenes)) {
+            throw new Exception(__('Liste de scènes illisible.', __FILE__));
+        }
+        $out = array();
+        $ids = array();
+        $names = array();
+        foreach ($_scenes as $raw) {
+            $scene = self::normalizeScene($raw);
+            $base = $scene['id'];
+            for ($n = 2; isset($ids[$scene['id']]); $n++) {
+                $scene['id'] = $base . '_' . $n;
+            }
+            if (isset($names[mb_strtolower($scene['name'])])) {
+                throw new Exception(sprintf(__('Deux scènes portent le nom « %s ».', __FILE__), $scene['name']));
+            }
+            if ($scene['strip']['json'] !== '' && !is_array(json_decode($scene['strip']['json'], true))) {
+                throw new Exception(sprintf(__('Scène « %s » : le JSON avancé (bande) est illisible.', __FILE__), $scene['name']));
+            }
+            if ($scene['matrix']['json'] !== '' && !is_array(json_decode($scene['matrix']['json'], true))) {
+                throw new Exception(sprintf(__('Scène « %s » : le JSON avancé (matrice) est illisible.', __FILE__), $scene['name']));
+            }
+            $ids[$scene['id']] = 1;
+            $names[mb_strtolower($scene['name'])] = 1;
+            $out[] = $scene;
+        }
+        config::save('scenes', json_encode($out), __CLASS__);
+        foreach (self::byType(__CLASS__) as $eqLogic) {
+            try {
+                $eqLogic->syncSceneCommands($out);
+            } catch (Throwable $e) {
+                log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
+            }
+        }
+        return $out;
+    }
+
+    /* Une scène par son identifiant ou par son nom, sans égard à la casse. */
+    public static function findScene($_ref) {
+        $ref = mb_strtolower(trim((string) $_ref));
+        foreach (self::scenes() as $scene) {
+            if ($scene['id'] === $ref || mb_strtolower($scene['name']) === $ref) {
+                return $scene;
+            }
+        }
+        $names = array_map(function ($s) { return $s['name']; }, self::scenes());
+        throw new Exception(sprintf(__('Scène inconnue : « %s ». Scènes disponibles : %s', __FILE__), $_ref, implode(', ', $names)));
+    }
+
+    /*
+     * Options d'un lancement, écrites en clair dans le message d'un scénario :
+     *   « durée=30 »   « durée=5m »   « durée=0 » (sans fin)   ou « 30 » seul
+     *   « délai=10 »   « heure=22:30 »   « priorité=95 »   « fin=éteindre »
+     * Les unités s, m, h sont comprises ; sans unité, ce sont des secondes.
+     */
+    public static function parseSceneOptions($_text, $_now = null) {
+        $now = $_now === null ? time() : (int) $_now;
+        $options = array();
+        $text = trim((string) $_text);
+        if ($text === '') {
+            return $options;
+        }
+        foreach (preg_split('/[\s;]+/', $text) as $token) {
+            if ($token === '') {
+                continue;
+            }
+            $parts = explode('=', $token, 2);
+            if (count($parts) === 1) {
+                $key = 'duree';
+                $value = $parts[0];
+            } else {
+                $key = self::slug($parts[0]);
+                $value = trim($parts[1]);
+            }
+            switch ($key) {
+                case 'duree':
+                case 'duration':
+                case 'd':
+                    $options['duration'] = self::parseSeconds($value);
+                    break;
+                case 'delai':
+                case 'delay':
+                case 'dans':
+                    $options['delay'] = self::parseSeconds($value);
+                    break;
+                case 'heure':
+                case 'at':
+                case 'a':
+                    if (!preg_match('/^(\d{1,2})[:hH](\d{2})$/', $value, $m) || (int) $m[1] > 23 || (int) $m[2] > 59) {
+                        throw new Exception(__('Heure illisible :', __FILE__) . ' ' . $value);
+                    }
+                    $at = mktime((int) $m[1], (int) $m[2], 0, (int) date('n', $now), (int) date('j', $now), (int) date('Y', $now));
+                    if ($at <= $now) {
+                        $at = strtotime('+1 day', $at);
+                    }
+                    $options['delay'] = $at - $now;
+                    break;
+                case 'priorite':
+                case 'prio':
+                case 'priority':
+                    if (!is_numeric($value)) {
+                        throw new Exception(__('Priorité illisible :', __FILE__) . ' ' . $value);
+                    }
+                    $options['priority'] = max(0, min(100, (int) $value));
+                    break;
+                case 'fin':
+                case 'end':
+                    $map = array('restaurer' => 'restore', 'restore' => 'restore', 'eteindre' => 'off', 'off' => 'off',
+                                 'garder' => 'keep', 'keep' => 'keep', 'laisser' => 'keep');
+                    $v = self::slug($value);
+                    if (!isset($map[$v])) {
+                        throw new Exception(__('Fin de scène illisible (restaurer, éteindre ou garder) :', __FILE__) . ' ' . $value);
+                    }
+                    $options['end'] = $map[$v];
+                    break;
+                default:
+                    throw new Exception(__('Option de scène inconnue :', __FILE__) . ' ' . $token);
+            }
+        }
+        return $options;
+    }
+
+    public static function parseSeconds($_value) {
+        $v = strtolower(trim((string) $_value));
+        if (in_array($v, array('0', 'infini', 'sansfin', 'illimite', 'illimitee', 'none'), true)) {
+            return 0;
+        }
+        if (!preg_match('/^(\d+(?:[.,]\d+)?)\s*(s|sec|m|min|h)?$/', $v, $m)) {
+            throw new Exception(__('Durée illisible :', __FILE__) . ' ' . $_value);
+        }
+        $n = (float) str_replace(',', '.', $m[1]);
+        $unit = isset($m[2]) ? $m[2] : 's';
+        $factor = ($unit === 'h') ? 3600 : (($unit === 'm' || $unit === 'min') ? 60 : 1);
+        return (int) round($n * $factor);
+    }
+
+    /* ========================================================= SCÈNES : ORDRES WLED */
+
+    /* La recette qui convient à cet appareil. */
+    public function recipeFor($_scene) {
+        if ($this->isMatrix() && !empty($_scene['matrix']['enabled'])) {
+            return $_scene['matrix'];
+        }
+        return $_scene['strip'];
+    }
+
+    /*
+     * L'ordre WLED qui joue une scène sur cet appareil. Il vise tous les
+     * segments existants (relevés dans $_state), pour que la scène couvre
+     * toute la bande quelle que soit la sélection faite dans WLED, et se fait
+     * sans fondu (« tt »:0), pour qu'un flash d'alarme parte net.
+     */
+    public function sceneFragment($_scene, $_state) {
+        $recipe = $this->recipeFor($_scene);
+        $fx = is_numeric($recipe['effect']) ? (int) $recipe['effect'] : $this->effectIdByName($recipe['effect']);
+        if ($fx === null) {
+            throw new Exception(sprintf(__('Scène « %s » : effet « %s » inconnu sur ce WLED (version %s).', __FILE__),
+                $_scene['name'], $recipe['effect'], $this->getConfiguration('version')));
+        }
+        $seg = array('on' => true, 'frz' => false, 'fx' => $fx, 'sx' => $recipe['speed'], 'ix' => $recipe['intensity'],
+                     'col' => array_map(array(__CLASS__, 'hexToColor'), $recipe['colors']));
+        if ($recipe['palette'] !== '') {
+            $pal = is_numeric($recipe['palette']) ? (int) $recipe['palette'] : $this->paletteIdByName($recipe['palette']);
+            if ($pal === null) {
+                throw new Exception(sprintf(__('Scène « %s » : palette « %s » inconnue sur ce WLED.', __FILE__), $_scene['name'], $recipe['palette']));
+            }
+            $seg['pal'] = $pal;
+        }
+        if ($recipe['text'] !== '') {
+            /* L'effet « Scrolling Text » affiche le nom du segment. */
+            $seg['n'] = $recipe['text'];
+        }
+        $fragment = array('on' => true, 'bri' => max(1, (int) round($recipe['brightness'] * 2.55)), 'tt' => 0);
+
+        $extra = $recipe['json'] !== '' ? json_decode($recipe['json'], true) : array();
+        if (!is_array($extra)) {
+            $extra = array();
+        }
+        if (isset($extra['seg']) && is_array($extra['seg']) && array_keys($extra['seg']) !== range(0, count($extra['seg']) - 1)) {
+            $seg = array_replace($seg, $extra['seg']);
+            unset($extra['seg']);
+        }
+
+        $ids = array();
+        foreach ((isset($_state['seg']) && is_array($_state['seg'])) ? $_state['seg'] : array() as $rank => $s) {
+            $ids[] = isset($s['id']) ? (int) $s['id'] : (int) $rank;
+        }
+        if (empty($ids)) {
+            $ids = array(0);
+        }
+        $fragment['seg'] = array();
+        foreach ($ids as $id) {
+            $fragment['seg'][] = array('id' => $id) + $seg;
+        }
+        return array_replace($fragment, $extra);
+    }
+
+    public function paletteIdByName($_name) {
+        $wanted = strtolower(trim((string) $_name));
+        foreach ((array) $this->getCache('pal_names', array()) as $id => $name) {
+            if (strtolower(trim((string) $name)) === $wanted) {
+                return (int) $id;
+            }
+        }
+        return null;
+    }
+
+    /* Réglages d'un segment que rend la restauration : l'aspect, jamais la
+     * géométrie, qu'une scène ne touche pas. */
+    const RESTORED_SEG_KEYS = array('on', 'bri', 'col', 'fx', 'sx', 'ix', 'pal', 'c1', 'c2', 'c3', 'o1', 'o2', 'o3', 'frz', 'cct', 'm12', 'si');
+
+    /*
+     * L'ordre qui rend l'éclairage d'avant la première scène. Une playlist en
+     * cours est relancée plutôt que figée sur le preset qu'elle jouait.
+     */
+    public static function restoreFragment($_snapshot) {
+        $snap = is_array($_snapshot) ? $_snapshot : array();
+        if (isset($snap['pl']) && (int) $snap['pl'] > 0) {
+            return array('ps' => (int) $snap['pl']);
+        }
+        $fragment = array();
+        foreach (array('on', 'bri', 'lor') as $key) {
+            if (isset($snap[$key])) {
+                $fragment[$key] = $snap[$key];
+            }
+        }
+        $segs = array();
+        foreach ((isset($snap['seg']) && is_array($snap['seg'])) ? $snap['seg'] : array() as $rank => $s) {
+            if (!is_array($s)) {
+                continue;
+            }
+            $seg = array('id' => isset($s['id']) ? (int) $s['id'] : (int) $rank);
+            foreach (self::RESTORED_SEG_KEYS as $key) {
+                if (array_key_exists($key, $s)) {
+                    $seg[$key] = $s[$key];
+                }
+            }
+            /* WLED omet le nom d'un segment qui n'en a pas : la scène a pu en
+             * poser un (texte défilant), il faut l'effacer. */
+            $seg['n'] = isset($s['n']) ? (string) $s['n'] : '';
+            $segs[] = $seg;
+        }
+        if (!empty($segs)) {
+            $fragment['seg'] = $segs;
+        }
+        return $fragment;
+    }
+
+    /* ========================================================= SCÈNES : PILE */
+
+    /*
+     * Chaque appareil tient une pile de scènes : une entrée par scène lancée,
+     * active ou en attente de son heure. Celle qui s'affiche est la plus
+     * prioritaire des actives, la plus récente à priorité égale. Quand elle
+     * se termine, la suivante reprend la main ; quand il n'y en a plus,
+     * l'éclairage d'avant la première scène est rendu.
+     *
+     * La pile vit dans le cache de l'équipement et n'est modifiée que sous un
+     * verrou : un scénario d'alarme et le réveil du démon peuvent arriver en
+     * même temps.
+     */
+    private function withLock($_callback) {
+        $file = jeedom::getTmpFolder(__CLASS__) . '/stack_' . (int) $this->getId() . '.lock';
+        $handle = @fopen($file, 'c');
+        if ($handle === false) {
+            return $_callback();
+        }
+        flock($handle, LOCK_EX);
+        try {
+            return $_callback();
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    public function stack() {
+        $stack = $this->getCache('stack', array());
+        return is_array($stack) ? $stack : array();
+    }
+
+    /* L'entrée à afficher : la plus prioritaire des actives, la plus récente
+     * à priorité égale. */
+    public static function topEntry($_stack) {
+        $top = null;
+        foreach ($_stack as $entry) {
+            if (empty($entry['active'])) {
+                continue;
+            }
+            if ($top === null || $entry['priority'] > $top['priority']
+                || ($entry['priority'] == $top['priority'] && $entry['seq'] > $top['seq'])) {
+                $top = $entry;
+            }
+        }
+        return $top;
+    }
+
+    /* Lance une scène sur cet appareil, tout de suite ou après un délai. */
+    public function startScene($_ref, $_options = array()) {
+        $scene = self::findScene($_ref);
+        return $this->withLock(function () use ($scene, $_options) {
+            $now = time();
+            $stack = $this->stack();
+            $seq = (int) $this->getCache('seq', 0) + 1;
+            $this->setCache('seq', $seq);
+            $entry = array(
+                'key'      => $scene['id'],
+                'scene'    => $scene['id'],
+                'name'     => $scene['name'],
+                'priority' => isset($_options['priority']) ? (int) $_options['priority'] : $scene['priority'],
+                'duration' => isset($_options['duration']) ? (int) $_options['duration'] : $scene['duration'],
+                'end'      => isset($_options['end']) ? $_options['end'] : $scene['end'],
+                'guard'    => $scene['guard'],
+                'seq'      => $seq,
+                'active'   => false,
+                'start_at' => $now + (isset($_options['delay']) ? max(0, (int) $_options['delay']) : 0),
+                'until'    => 0,
+            );
+            /* Relancer une scène déjà présente la remplace : sa durée repart
+             * de zéro, elle ne s'empile pas deux fois. */
+            $stack = array_values(array_filter($stack, function ($e) use ($entry) { return $e['key'] !== $entry['key']; }));
+            $stack[] = $entry;
+            $this->setCache('stack', $stack);
+            if ($entry['start_at'] > $now) {
+                log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . sprintf(__('scène « %s » programmée à %s', __FILE__), $entry['name'], date('H:i:s', $entry['start_at'])));
+                $this->publishScene();
+                self::notifyDaemon();
+                return $entry;
+            }
+            $this->activateDue($now, $entry['key']);
+            return $entry;
+        });
+    }
+
+    /*
+     * Fait avancer la pile : les scènes dont l'heure est venue deviennent
+     * actives, celles dont la durée est écoulée sont retirées, et l'appareil
+     * affiche la bonne. Appelée sous verrou.
+     */
+    private function activateDue($_now, $_forceKey = null) {
+        $stack = $this->stack();
+        $ended = null;
+        foreach ($stack as $i => $entry) {
+            if (empty($entry['active']) && $entry['start_at'] <= $_now) {
+                $stack[$i]['active'] = true;
+                $stack[$i]['until'] = $entry['duration'] > 0 ? $_now + $entry['duration'] : 0;
+                log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . sprintf(__('scène « %s » lancée (priorité %d, %s)', __FILE__),
+                    $entry['name'], $entry['priority'], $entry['duration'] > 0 ? $entry['duration'] . ' s' : __('sans fin', __FILE__)));
+            }
+        }
+        foreach ($stack as $i => $entry) {
+            if (!empty($entry['active']) && $entry['until'] > 0 && $entry['until'] <= $_now) {
+                log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . sprintf(__('scène « %s » terminée', __FILE__), $entry['name']));
+                $ended = $entry;
+                unset($stack[$i]);
+            }
+        }
+        $stack = array_values($stack);
+        $this->setCache('stack', $stack);
+        $this->showTop($ended, $_forceKey);
+    }
+
+    /*
+     * Met l'appareil en accord avec le sommet de la pile. $_ended est la
+     * dernière entrée retirée : c'est son mode de fin qui s'applique quand la
+     * pile se vide. $_forceKey : une scène qu'on vient de relancer, à rejouer
+     * même si elle était déjà affichée.
+     */
+    private function showTop($_ended, $_forceKey = null) {
+        $top = self::topEntry($this->stack());
+        $applied = (string) $this->getCache('applied_key', '');
+        if ($top !== null) {
+            if ($top['key'] !== $applied || $top['key'] === $_forceKey) {
+                $this->applyEntry($top);
+            }
+        } elseif ($applied !== '') {
+            $this->endScenes($_ended !== null ? $_ended['end'] : 'restore');
+        }
+        $this->publishScene();
+        self::notifyDaemon();
+    }
+
+    private function applyEntry($_entry) {
+        /* L'éclairage d'avant n'est photographié qu'une fois, à l'entrée dans
+         * la première scène : une scène qui en remplace une autre ne doit pas
+         * prendre la précédente pour l'état à rendre. */
+        $snapshot = $this->getCache('snapshot', null);
+        if (!is_array($snapshot) || empty($snapshot)) {
+            $snapshot = $this->call('GET', '/json/state');
+            $this->setCache('snapshot', $snapshot);
+            $this->setCache('pending_restore', null);
+        }
+        $fragment = $this->sceneFragment(self::findScene($_entry['scene']), $snapshot);
+        $this->setCache('applied_key', $_entry['key']);
+        $this->setCache('applied_fragment', $fragment);
+        $this->setCache('guard_at', time() + self::GUARD_EVERY);
+        $this->sendState($fragment);
+    }
+
+    /* La pile est vide : on rend l'éclairage, on éteint, ou on laisse. */
+    private function endScenes($_mode) {
+        $snapshot = $this->getCache('snapshot', null);
+        $this->setCache('applied_key', '');
+        $this->setCache('applied_fragment', null);
+        $this->setCache('snapshot', null);
+        if ($_mode === 'keep') {
+            return;
+        }
+        $fragment = ($_mode === 'off' || !is_array($snapshot) || empty($snapshot))
+            ? array('on' => false) : self::restoreFragment($snapshot);
+        try {
+            $this->sendState($fragment);
+            $this->setCache('pending_restore', null);
+        } catch (Throwable $e) {
+            /* L'appareil ne répond pas : la restauration est retentée au
+             * prochain réveil, plutôt que de laisser l'alarme allumée. */
+            $this->setCache('pending_restore', $fragment);
+            $this->setCache('restore_at', time() + self::RESTORE_RETRY);
+            log::add(__CLASS__, 'warning', $this->getHumanName() . ' : ' . __('restauration impossible, nouvel essai dans', __FILE__) . ' ' . self::RESTORE_RETRY . ' s');
+        }
+    }
+
+    /* Arrête la scène affichée ($_all faux) ou toutes les scènes. */
+    public function stopScenes($_all) {
+        return $this->withLock(function () use ($_all) {
+            $stack = $this->stack();
+            if (empty($stack)) {
+                return false;
+            }
+            $ended = null;
+            if ($_all) {
+                $top = self::topEntry($stack);
+                $ended = $top !== null ? $top : end($stack);
+                /* « Tout arrêter » rend toujours l'éclairage d'avant. */
+                $ended['end'] = 'restore';
+                $stack = array();
+            } else {
+                $top = self::topEntry($stack);
+                if ($top === null) {
+                    return false;
+                }
+                $ended = $top;
+                $stack = array_values(array_filter($stack, function ($e) use ($top) { return $e['key'] !== $top['key']; }));
+            }
+            log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . ($_all ? __('toutes les scènes arrêtées', __FILE__)
+                : sprintf(__('scène « %s » arrêtée', __FILE__), $ended['name'])));
+            $this->setCache('stack', $stack);
+            $this->showTop($ended);
+            return true;
+        });
+    }
+
+    /*
+     * Une commande manuelle (allumer, couleur, effet…) pendant une scène :
+     * l'utilisateur reprend la main. Les scènes sont abandonnées sans rien
+     * restaurer — éteindre la lampe pendant la sonnette doit la laisser
+     * éteinte.
+     */
+    private function abandonScenes() {
+        $this->withLock(function () {
+            if (empty($this->stack()) && (string) $this->getCache('applied_key', '') === '') {
+                return;
+            }
+            log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . __('commande manuelle, scènes abandonnées', __FILE__));
+            $this->setCache('stack', array());
+            $this->setCache('applied_key', '');
+            $this->setCache('applied_fragment', null);
+            $this->setCache('snapshot', null);
+            $this->setCache('pending_restore', null);
+            $this->publishScene();
+            self::notifyDaemon();
+        });
+    }
+
+    /* Réveil par le démon (ou le cron) : avance la pile, retente une
+     * restauration en souffrance, et monte la garde. */
+    public function tick() {
+        return $this->withLock(function () {
+            $now = time();
+            $pending = $this->getCache('pending_restore', null);
+            if (is_array($pending) && !empty($pending) && empty($this->stack()) && (int) $this->getCache('restore_at', 0) <= $now) {
+                try {
+                    $this->sendState($pending);
+                    $this->setCache('pending_restore', null);
+                    log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . __('éclairage restauré', __FILE__));
+                } catch (Throwable $e) {
+                    $this->setCache('restore_at', $now + self::RESTORE_RETRY);
+                }
+            }
+            $this->activateDue($now);
+
+            /* La garde : une scène protégée qui a été défaite (bouton de
+             * l'appareil, redémarrage, autre système) est réimposée. */
+            $top = self::topEntry($this->stack());
+            $fragment = $this->getCache('applied_fragment', null);
+            if ($top !== null && !empty($top['guard']) && is_array($fragment) && (int) $this->getCache('guard_at', 0) <= $now) {
+                $this->setCache('guard_at', $now + self::GUARD_EVERY);
+                try {
+                    $diff = self::mismatches($fragment, $this->call('GET', '/json/state'));
+                    if (!empty($diff)) {
+                        log::add(__CLASS__, 'warning', $this->getHumanName() . ' : ' . sprintf(__('scène « %s » défaite (%s), réimposée', __FILE__), $top['name'], implode(' ; ', $diff)));
+                        $this->sendState($fragment);
+                    }
+                } catch (Throwable $e) {
+                    log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . __('garde :', __FILE__) . ' ' . $e->getMessage());
+                }
+                self::notifyDaemon();
+            }
+            return true;
+        });
+    }
+
+    /* Prochain instant où tick() a quelque chose à faire, ou null. */
+    public function nextWake() {
+        $times = array();
+        foreach ($this->stack() as $entry) {
+            if (empty($entry['active'])) {
+                $times[] = (int) $entry['start_at'];
+            } elseif ((int) $entry['until'] > 0) {
+                $times[] = (int) $entry['until'];
+            }
+        }
+        $top = self::topEntry($this->stack());
+        if ($top !== null && !empty($top['guard'])) {
+            $times[] = max(time(), (int) $this->getCache('guard_at', 0));
+        }
+        $pending = $this->getCache('pending_restore', null);
+        if (is_array($pending) && !empty($pending)) {
+            $times[] = (int) $this->getCache('restore_at', 0);
+        }
+        return empty($times) ? null : min($times);
+    }
+
+    private function publishScene() {
+        $top = self::topEntry($this->stack());
+        $this->publishCmd('scene', $top !== null ? $top['name'] : '');
+        $this->publishCmd('scene_active', $top !== null ? 1 : 0);
+        $this->publishCmd('scene_until', $top === null ? '' : ((int) $top['until'] > 0 ? date('H:i:s', (int) $top['until']) : __('sans fin', __FILE__)));
+    }
+
     /* ============================================================ ACTIONS */
 
+    /* Commandes qui ne sont pas un geste manuel sur la lumière : elles
+     * laissent les scènes en place. */
+    const SCENE_SAFE_ACTIONS = array('refresh', 'scene_start', 'scene_stop', 'scene_stop_all');
+
     public function runAction($_logicalId, $_options) {
+        if (strpos($_logicalId, 'scene::') === 0) {
+            return $this->startScene(substr($_logicalId, 7));
+        }
+        if (!in_array($_logicalId, self::SCENE_SAFE_ACTIONS, true)) {
+            $this->abandonScenes();
+        }
         switch ($_logicalId) {
             case 'refresh':
                 return $this->pollNow();
+            case 'scene_start':
+                $ref = isset($_options['title']) ? trim((string) $_options['title']) : '';
+                if ($ref === '') {
+                    throw new Exception(__('Indiquez le nom de la scène dans le titre.', __FILE__));
+                }
+                return $this->startScene($ref, self::parseSceneOptions(isset($_options['message']) ? $_options['message'] : ''));
+            case 'scene_stop':
+                return $this->stopScenes(false);
+            case 'scene_stop_all':
+                return $this->stopScenes(true);
             case 'on_set':
                 return $this->sendState(array('on' => true));
             case 'off_set':
@@ -1166,6 +1951,46 @@ class wledbe extends eqLogic {
         $this->addCmdIfMissing('preset_set', 'Appliquer un preset', 'action', 'select', array('order' => 109, 'value' => $preset));
         $this->addCmdIfMissing('json_set', 'Envoyer un état JSON', 'action', 'message', array('order' => 110));
         $this->addCmdIfMissing('refresh', 'Rafraîchir', 'action', 'other', array('order' => 120, 'isVisible' => 1));
+
+        $this->addCmdIfMissing('scene', 'Scène en cours', 'info', 'string', array('order' => 20, 'isVisible' => 1));
+        $this->addCmdIfMissing('scene_active', 'Scène active', 'info', 'binary', array('order' => 21));
+        $this->addCmdIfMissing('scene_until', 'Fin de la scène', 'info', 'string', array('order' => 22));
+        $this->addCmdIfMissing('scene_start', 'Lancer une scène', 'action', 'message', array('order' => 200));
+        $this->addCmdIfMissing('scene_stop', 'Arrêter la scène en cours', 'action', 'other', array('order' => 201));
+        $this->addCmdIfMissing('scene_stop_all', 'Arrêter toutes les scènes', 'action', 'other', array('order' => 202, 'isVisible' => 1));
+        $this->syncSceneCommands(self::scenes());
+    }
+
+    /*
+     * Une commande « Scène … » par scène de la bibliothèque, qui la lance avec
+     * ses réglages par défaut. Une scène renommée garde sa commande (même
+     * identifiant) et la renomme ; une scène supprimée perd la sienne.
+     */
+    public function syncSceneCommands($_scenes) {
+        if ($this->getId() == '') {
+            return;
+        }
+        $wanted = array();
+        foreach ($_scenes as $rank => $scene) {
+            $logicalId = 'scene::' . $scene['id'];
+            $wanted[$logicalId] = 1;
+            $name = cleanComponanteName(__('Scène', __FILE__) . ' ' . $scene['name']);
+            $cmd = $this->getCmd('action', $logicalId);
+            if (!is_object($cmd)) {
+                $this->addCmdIfMissing($logicalId, $name, 'action', 'other', array('order' => 300 + $rank));
+                continue;
+            }
+            $other = cmd::byEqLogicIdCmdName($this->getId(), $name);
+            if ($cmd->getName() !== $name && (!is_object($other) || $other->getId() == $cmd->getId())) {
+                $cmd->setName($name);
+                $cmd->save();
+            }
+        }
+        foreach ($this->getCmd('action') as $cmd) {
+            if (strpos($cmd->getLogicalId(), 'scene::') === 0 && !isset($wanted[$cmd->getLogicalId()])) {
+                $cmd->remove();
+            }
+        }
     }
 
     private function addCmdIfMissing($_logicalId, $_name, $_type, $_subType, $_options = array()) {
@@ -1265,6 +2090,9 @@ class wledbe extends eqLogic {
             'palettes'  => count((array) $this->getCache('pal_names', array())),
             'presets'   => count((array) $this->getCache('preset_names', array())),
             'raw'       => $this->getCache('raw', array()),
+            'stack'     => $this->stack(),
+            'applied'   => (string) $this->getCache('applied_key', ''),
+            'snapshot'  => is_array($this->getCache('snapshot', null)),
         );
     }
 }

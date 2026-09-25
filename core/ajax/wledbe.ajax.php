@@ -84,6 +84,54 @@ try {
         ajax::success($result);
     }
 
+    /* La bibliothèque de scènes, et de quoi l'éditer : appareils, et noms
+     * d'effets et de palettes connus sur l'ensemble des WLED. */
+    if (init('action') == 'scenes') {
+        $devices = array();
+        $effects = array();
+        $palettes = array();
+        foreach (wledbe::byType('wledbe') as $eqLogic) {
+            $devices[] = array('id' => $eqLogic->getId(), 'name' => $eqLogic->getHumanName(), 'matrix' => $eqLogic->isMatrix());
+            foreach ((array) $eqLogic->getCache('fx_names', array()) as $name) {
+                if ($name !== 'RSVD' && $name !== '-') {
+                    $effects[$name] = 1;
+                }
+            }
+            foreach ((array) $eqLogic->getCache('pal_names', array()) as $name) {
+                $palettes[$name] = 1;
+            }
+        }
+        $effects = array_keys($effects);
+        $palettes = array_keys($palettes);
+        natcasesort($effects);
+        natcasesort($palettes);
+        ajax::success(array('scenes' => wledbe::scenes(), 'devices' => $devices,
+            'effects' => array_values($effects), 'palettes' => array_values($palettes)));
+    }
+
+    if (init('action') == 'saveScenes') {
+        unautorizedInDemo();
+        ajax::success(wledbe::saveScenes(json_decode(init('scenes'), true)));
+    }
+
+    if (init('action') == 'resetScenes') {
+        unautorizedInDemo();
+        ajax::success(wledbe::saveScenes(wledbe::DEFAULT_SCENES));
+    }
+
+    /* Joue une scène enregistrée, le temps d'un essai. */
+    if (init('action') == 'testScene') {
+        unautorizedInDemo();
+        $eqLogic = wledbeEq();
+        $duration = max(1, min(600, (int) init('duration', 10)));
+        ajax::success($eqLogic->startScene(init('scene'), array('duration' => $duration, 'priority' => 100)));
+    }
+
+    if (init('action') == 'stopScenes') {
+        unautorizedInDemo();
+        ajax::success(wledbeEq()->stopScenes(true));
+    }
+
     /* Lit le cache, n'interroge jamais l'appareil. */
     if (init('action') == 'data') {
         ajax::success(wledbeEq()->toAjax());
