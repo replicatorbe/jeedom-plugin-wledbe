@@ -286,7 +286,7 @@ section('Scènes : bibliothèque et options');
 
 $scenes = wledbe::scenes();
 check('scènes livrées', count($scenes), 6);
-check('Police : recette bande Chase 2', wledbe::findScene('police')['strip']['effect'], 'Chase 2');
+check('Police : Two Dots, l\'ancien effet Police de WLED', wledbe::findScene('police')['strip']['effect'], 'Two Dots');
 check('recherche par nom, sans égard à la casse', wledbe::findScene('ALARME INTRUSION')['id'], 'alarme');
 $err = '';
 try { wledbe::findScene('Disco'); } catch (Exception $e) { $err = $e->getMessage(); }
@@ -317,7 +317,7 @@ $strip->configuration = array('ip' => '192.168.1.50', 'verify' => 1, 'layout' =>
 $strip->setCache('fx_names', $eff);
 $strip->setCache('pal_names', $pal);
 $frag = $strip->sceneFragment(wledbe::findScene('police'), $si['state']);
-check('Police : effet résolu par son nom', $frag['seg'][0]['fx'], 37);
+check('Police : effet résolu par son nom', $frag['seg'][0]['fx'], 50);
 check('Police : rouge puis bleu', $frag['seg'][0]['col'], array(array(255, 0, 0), array(0, 0, 255), array(0, 0, 0)));
 check('sans fondu', $frag['tt'], 0);
 check('tous les segments visés, par id', $frag['seg'][0]['id'], 0);
@@ -329,7 +329,7 @@ $matrixEq->configuration = array('ip' => '192.168.1.51', 'layout' => 'matrix');
 $matrixEq->setCache('fx_names', $eff);
 $mfrag = $matrixEq->sceneFragment(wledbe::findScene('alarme'), $si['state']);
 check('matrice : texte défilant', $mfrag['seg'][0]['fx'] . ' ' . $mfrag['seg'][0]['n'], '122 ALARME');
-check('matrice sans recette propre : recette bande', $matrixEq->sceneFragment(wledbe::findScene('police'), $si['state'])['seg'][0]['fx'], 37);
+check('matrice sans recette propre : recette bande', $matrixEq->sceneFragment(wledbe::findScene('police'), $si['state'])['seg'][0]['fx'], 50);
 
 $custom = wledbe::normalizeScene(array('name' => 'Perso', 'strip' => array('effect' => 'Rainbow', 'palette' => 'Party', 'json' => '{"seg":{"c1":200},"transition":0}')));
 $cfrag = $strip->sceneFragment($custom, $si['state']);
@@ -359,9 +359,9 @@ $strip->startScene('sonnette', array('duration' => 0));
 check('sonnette affichée', $strip->state['seg'][0]['fx'], 1);
 check('info « Scène en cours »', $strip->published['scene'], 'Sonnette');
 $strip->startScene('police', array('duration' => 0));
-check('police (90) recouvre la sonnette (40)', $strip->state['seg'][0]['fx'], 37);
+check('police (90) recouvre la sonnette (40)', $strip->state['seg'][0]['fx'], 50);
 $strip->startScene('notification', array('duration' => 0));
-check('notification (20) ne recouvre pas la police', $strip->state['seg'][0]['fx'], 37);
+check('notification (20) ne recouvre pas la police', $strip->state['seg'][0]['fx'], 50);
 check('trois scènes dans la pile', count($strip->stack()), 3);
 check('prochain réveil : aucun (scènes sans fin, sans garde)', $strip->nextWake(), null);
 $strip->stopScenes(false);
@@ -398,7 +398,7 @@ $stack = $strip->stack();
 $stack[0]['start_at'] = time() - 1;
 sceneSetT($strip, array('stack' => $stack));
 $strip->tick();
-check('heure venue : scène lancée', $strip->state['seg'][0]['fx'], 37);
+check('heure venue : scène lancée', $strip->state['seg'][0]['fx'], 50);
 $strip->stopScenes(true);
 
 /* Garde : l'alarme défaite est réimposée. */
@@ -497,7 +497,7 @@ check('WLED muet : scène pas marquée affichée', (string) sceneGetT($r, 'appli
 check('WLED muet : nouvel essai prévu, pas dans le passé', $r->nextWake() > time(), true);
 sceneSetT($r, array('retry_at' => time() - 1));
 $r->tick();
-check('au réveil, la scène est affichée', $r->state['seg'][0]['fx'], 37);
+check('au réveil, la scène est affichée', $r->state['seg'][0]['fx'], 50);
 $r->stopScenes(true);
 
 /* Scène injouable (effet absent) sous garde : retirée, sans boucle. */
@@ -690,7 +690,7 @@ check('membre en échec : vérification du groupe à 0', $g->published['verify_o
 /* Scène sur le groupe : chaque membre la joue et la rend. */
 $a->state = $si['state']; $b->state = $si['state'];
 $g->runAction('scene::police', array());
-check('scène de groupe : police sur les deux', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(37, 38));
+check('scène de groupe : police sur les deux', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(50, 51));
 $g->runAction('scene_stop_all', array());
 check('arrêt de groupe : éclairage rendu partout', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(0, 0));
 

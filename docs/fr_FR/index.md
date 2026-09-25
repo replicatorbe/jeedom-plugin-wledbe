@@ -140,7 +140,7 @@ tous vos WLED. Elle est livrée avec six scènes, toutes modifiables :
 |---|---|---|---|---|---|
 | Alarme intrusion | Strobe Mega rouge et blanc | texte « ALARME » | 100 | 5 min | oui |
 | Incendie | Strobe orange | texte « FEU » | 100 | 5 min | oui |
-| Police | Chase 2 rouge et bleu | recette bande | 90 | 2 min | non |
+| Police | Two Dots (l'ancien effet Police de WLED), rouge et bleu | recette bande | 90 | 2 min | non |
 | Fuite d'eau | Running bleu | texte « FUITE » | 80 | 5 min | oui |
 | Sonnette | Blink blanc | recette bande | 40 | 10 s | non |
 | Notification | Breathe bleu clair | recette bande | 20 | 15 s | non |

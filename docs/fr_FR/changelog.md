@@ -1,5 +1,12 @@
 # Changelog — plugin WLED
 
+## 0.3.2 (beta)
+
+- Scène « Police » : effet « Two Dots » (l'ancien effet Police de WLED),
+  rouge et bleu francs. « Chase 2 » mélangeait les deux couleurs en mauve.
+  Une bibliothèque déjà enregistrée garde sa recette : choisissez « Two Dots »
+  dans l'éditeur, ou « Scènes d'origine ».
+
 ## 0.3.1 (beta)
 
 Relecture de la 0.3, corrections :
