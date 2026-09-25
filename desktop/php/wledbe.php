@@ -64,7 +64,11 @@ $eqLogics = eqLogic::byType($plugin->getId());
 
 		<legend><i class="fas fa-lightbulb"></i> {{Mes WLED}}</legend>
 		<?php
-		if (count($eqLogics) == 0) {
+		$wledbeHasDevice = false;
+		foreach ($eqLogics as $wledbeEq) {
+			$wledbeHasDevice = $wledbeHasDevice || !$wledbeEq->isGroup();
+		}
+		if (!$wledbeHasDevice) {
 			echo '<div class="alert alert-info" style="margin:5px;">';
 			echo '<b>{{Aucun WLED pour le moment. Pour démarrer :}}</b>';
 			echo '<ol style="margin:5px 0 0 0;padding-left:20px;">';
@@ -109,14 +113,13 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				echo '<br>';
 				echo '<span class="name">' . $eqLogic->getHumanName(true, true) . '</span>';
 				echo '<span class="hiddenAsCard displayTableRight hidden">';
-				echo '<span class="label label-info">{{Groupe}} · ' . count(wledbe::parseMembers($eqLogic->getConfiguration('members', array()))) . ' {{membre(s)}}</span> ';
+				echo '<span class="label label-info">{{Groupe}} · ' . count($eqLogic->members()) . ' {{membre(s) actif(s)}}</span> ';
 				echo ($eqLogic->getIsVisible() == 1) ? '<i class="fas fa-eye" title="{{Equipement visible}}"></i>' : '<i class="fas fa-eye-slash" title="{{Equipement non visible}}"></i>';
 				echo '</span>';
 				echo '</div>';
 			}
 			echo '</div>';
 		}
-		echo '</div>';
 		?>
 	</div>
 
@@ -214,7 +217,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 										echo '</label></div>';
 									}
 									?>
-									<span class="help-block">{{Un ordre donné au groupe part vers tous ses membres en même temps. Chaque membre garde sa vérification et ses propres scènes. « Choisir un effet » ne propose que les effets que tous les membres connaissent.}}</span>
+									<span class="help-block">{{Allumer, éteindre, couleur, effet… partent vers tous les membres en même temps ; les scènes et le texte sont lancés membre par membre. Chaque membre garde sa vérification et ses propres scènes. « Choisir un effet » ne propose que les effets que tous les membres connaissent.}}</span>
 								</div>
 							</div>
 						</fieldset>
@@ -286,6 +289,9 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<div class="col-xs-12">
 					<div class="alert alert-info" id="div_wledbeState">{{Chargement…}}</div>
 					<div id="div_wledbeMembers"></div>
+					<div class="wledbeGroupOnly" style="display:none;margin-bottom:10px;">
+						<a class="btn btn-default btn-sm" id="bt_wledbeGroupRefresh"><i class="fas fa-sync"></i> {{Actualiser l'état des membres}}</a>
+					</div>
 					<div class="wledbeDeviceOnly">
 					<legend><i class="fas fa-theater-masks"></i> {{Scènes sur cet appareil}}</legend>
 					<div id="div_wledbeStack"></div>

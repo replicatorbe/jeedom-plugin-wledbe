@@ -657,10 +657,20 @@ check('vérification du groupe OK', $g->published['verify_ok'], 1);
 $g->runAction('effect_set', array('select' => 'Chase 2'));
 check('effet par nom : numéro propre à chaque membre', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(37, 38));
 
+/* Les listes des membres, telles que refreshLists() les écrit : filtrées
+ * selon le type (pas d'effet 2D sur la bande). */
+$a->getCmd('action', 'effect_set')->setConfiguration('listValue', wledbe::listValue(wledbe::effectList($fxOld, $fxdata, false)));
+$b->getCmd('action', 'effect_set')->setConfiguration('listValue', wledbe::listValue(wledbe::effectList($fxNew, array(), true)));
 $g->refreshGroupLists();
 $list = $g->getCmd('action', 'effect_set')->configuration['listValue'];
 check('liste du groupe : effets communs, par nom', strpos($list, 'Chase 2|Chase 2') !== false, true);
 check('liste du groupe : un effet d\'un seul membre absent', strpos($list, 'Nouveau') === false, true);
+check('liste du groupe : pas d\'effet 2D (la bande ne l\'a pas)', strpos($list, 'Scrolling Text') === false, true);
+$c = new wledbeFake(); $c->id = 82; $c->configuration = array('ip' => '10.0.0.82', 'layout' => 'strip'); $c->createCommands();
+$g->fakeMembers = array($a, $b, $c);
+$g->refreshGroupLists();
+check('membre sans liste lue : la liste du groupe reste remplie', strpos($g->getCmd('action', 'effect_set')->configuration['listValue'], 'Chase 2') !== false, true);
+$g->fakeMembers = array($a, $b);
 
 $a->state['on'] = false;
 $g->runAction('toggle', array());
@@ -685,7 +695,7 @@ $g->runAction('scene_stop_all', array());
 check('arrêt de groupe : éclairage rendu partout', array($a->state['seg'][0]['fx'], $b->state['seg'][0]['fx']), array(0, 0));
 
 /* Texte : seules les matrices du groupe l'affichent. */
-$g->runAction('text_show', array('message' => 'BONJOUR', 'title' => 'couleur=vert durée=10'));
+$g->runAction('text_show', array('title' => 'BONJOUR', 'message' => 'couleur=vert durée=10'));
 check('texte de groupe : sur la matrice', $b->state['seg'][0]['n'] ?? '', 'BONJOUR');
 check('texte de groupe : pas sur la bande', isset($a->state['seg'][0]['n']), false);
 $b->stopScenes(true);
@@ -730,6 +740,65 @@ sceneSetT($a, array('guard_at' => time() + 8, 'guard_ran' => time()));
 $a->ingestLive($pushed);
 check('garde qui vient de tourner : pas relancée en boucle', (int) sceneGetT($a, 'guard_at') > time(), true);
 $a->stopScenes(true);
+
+
+/* ------------------------------------------------------------------------ */
+section('Relecture V3');
+
+/* Membres gardés en texte : la page du coeur les renvoie tels quels. */
+$gs = new wledbeFakeGroup(); $gs->id = 91;
+$gs->configuration = array('kind' => 'group', 'members' => array(3, 5));
+$gs->preSave();
+check('membres enregistrés en texte « 3,5 »', $gs->configuration['members'], '3,5');
+$gs->configuration['members'] = '3,5';
+$gs->preSave();
+check('et relus à l\'identique', $gs->configuration['members'], '3,5');
+
+/* Texte : accents translittérés, balises gardées, limite de 32. */
+check('accents translittérés', wledbe::sceneText('Alerte école à 7h'), 'Alerte ecole a 7h');
+check('« <3 » n\'est pas pris pour une balise', wledbe::sceneText('I <3 U'), 'I <3 U');
+check('caractères hors ASCII retirés', wledbe::sceneText('Feu 🔥 !'), 'Feu  !');
+check('coupé à 32 caractères', strlen(wledbe::sceneText(str_repeat('é', 40))), 32);
+$err = '';
+try { $b->showText('🔥🔥'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('texte vide une fois nettoyé : refusé', strpos($err, 'Aucun texte') !== false, true);
+
+/* Le texte ne dépend pas de la bibliothèque. */
+$b->state = $si['state'];
+$b->showText('MATIN', 'heure=07:00');
+$b->purgeScenes(array('police' => 1));
+check('texte programmé : survit à l\'enregistrement des scènes', array_column($b->stack(), 'key'), array('_texte'));
+$b->stopScenes(true);
+$lib = wledbe::saveScenes(array(array('id' => '_texte', 'name' => 'Texte perso')));
+check('identifiant réservé refusé à la bibliothèque', $lib[0]['id'], 'texte');
+config::save('scenes', '', 'wledbe');
+
+/* État poussé par un autre appareil : ignoré, garde comprise. */
+$a->state = $si['state'];
+$a->startScene('alarme', array('duration' => 0));
+sceneSetT($a, array('guard_at' => time() + 8, 'guard_ran' => time() - 60));
+$intrus = array('state' => array('on' => false, 'seg' => array()), 'info' => $si['info']);
+$intrus['info']['mac'] = 'ffffffffffff';
+$a->ingestLive($intrus);
+check('état d\'un autre appareil : la garde ne bouge pas', (int) sceneGetT($a, 'guard_at') > time(), true);
+$a->stopScenes(true);
+
+/* Groupe : ordre relatif jamais renvoyé, membre hors ligne sans relances. */
+$a->state = $si['state']; $b->state = $si['state'];
+$a->posts = 0; $b->posts = 0;
+$b->lose = 10;
+try { $g->runAction('json_set', array('message' => '{"bri":"~10"}')); } catch (Exception $e) {}
+$b->lose = 0;
+check('ordre relatif perdu : pas renvoyé', $b->posts, 1);
+$b->down = 50; $b->posts = 0;
+$b->setCache('failures', wledbe::OFFLINE_AFTER);
+$t0 = microtime(true);
+$err = '';
+try { $g->runAction('on_set', array()); } catch (Exception $e) { $err = $e->getMessage(); }
+check('membre connu hors ligne : aucune relance', microtime(true) - $t0 < 1, true);
+check('membre connu hors ligne : dit dans l\'erreur', strpos($err, 'hors ligne') !== false, true);
+check('l\'autre membre servi', $a->state['on'], true);
+$b->down = 0; $b->setCache('failures', 0);
 
 /* ------------------------------------------------------------------------ */
 section('Commandes');

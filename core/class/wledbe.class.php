@@ -260,8 +260,12 @@ class wledbe extends eqLogic {
             if ($at !== null) {
                 $timers[] = array('eq' => (int) $eqLogic->getId(), 'at' => $at, 'name' => $eqLogic->getHumanName());
             }
-            if ($eqLogic->isConfigured() && !$eqLogic->isGroup() && config::byKey('live', __CLASS__, 1) == 1) {
-                $live[] = array('eq' => (int) $eqLogic->getId(), 'ip' => $eqLogic->getConfiguration('ip'), 'name' => $eqLogic->getHumanName());
+            /* Une adresse IPv4, avec son port éventuel : un nom d'hôte
+             * obligerait le démon à une résolution DNS bloquante. */
+            if ($eqLogic->isConfigured() && !$eqLogic->isGroup() && config::byKey('live', __CLASS__, 1) == 1
+                && preg_match('/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/', (string) $eqLogic->getConfiguration('ip'), $m)) {
+                $live[] = array('eq' => (int) $eqLogic->getId(), 'ip' => $m[1], 'port' => isset($m[2]) ? (int) $m[2] : 80,
+                                'name' => $eqLogic->getHumanName());
             }
         }
         return array('timers' => $timers, 'live' => $live);
@@ -277,7 +281,11 @@ class wledbe extends eqLogic {
         if (!is_array($_data) || !isset($_data['state']) || !is_array($_data['state'])) {
             return;
         }
-        $this->ingest($_data);
+        /* Un autre appareil à cette adresse : son état ne dit rien de la
+         * scène de celui-ci. */
+        if ($this->ingest($_data, false) === false) {
+            return;
+        }
         $this->withLock(function () use ($_data) {
             $top = self::topEntry($this->stack());
             $fragment = $this->sceneGet('applied_fragment', null);
@@ -307,7 +315,10 @@ class wledbe extends eqLogic {
             $this->setConfiguration('verify', 1);
         }
         if ($this->isGroup()) {
-            $this->setConfiguration('members', self::parseMembers($this->getConfiguration('members', array())));
+            /* En texte « 12,34 » et non en liste : la page du coeur ne sait
+             * mettre qu'un texte dans un champ, et une liste reviendrait
+             * vide à l'enregistrement suivant. */
+            $this->setConfiguration('members', implode(',', self::parseMembers($this->getConfiguration('members', ''))));
             return;
         }
         $this->setConfiguration('ip', trim((string) $this->getConfiguration('ip', '')));
@@ -325,11 +336,36 @@ class wledbe extends eqLogic {
             $this->refreshGroup();
             return;
         }
+        /* Adresse, activation, appareil ajouté : le démon rouvre ses
+         * connexions directes sans attendre sa relecture de la minute, et
+         * les groupes recalculent leur état et leurs listes. */
+        self::notifyDaemon();
+        foreach ($this->groups() as $group) {
+            $group->refreshGroupLists();
+            $group->refreshGroup();
+        }
         if ($this->getCache('ip_seen', '') !== $this->getConfiguration('ip')) {
             $this->setCache('ip_seen', $this->getConfiguration('ip'));
             $this->setCache('failures', 0);
             $this->setCache('lists_sig', '');
         }
+    }
+
+    public function postRemove() {
+        cache::set($this->sceneKey(), array());
+        self::notifyDaemon();
+        if (!$this->isGroup()) {
+            foreach ($this->groups() as $group) {
+                $group->refreshGroupLists();
+                $group->refreshGroup();
+            }
+        }
+    }
+
+    /* Réglage « État instantané » changé dans la configuration : le démon
+     * ouvre ou ferme ses connexions tout de suite. */
+    public static function postConfig_live($_value) {
+        self::notifyDaemon();
     }
 
     public function isConfigured() {
@@ -957,7 +993,7 @@ class wledbe extends eqLogic {
     }
 
     /* Réponse de /json/si : état et identité de l'appareil. */
-    public function ingest($_data) {
+    public function ingest($_data, $_refreshLists = true) {
         $state = isset($_data['state']) && is_array($_data['state']) ? $_data['state'] : array();
         $info = isset($_data['info']) && is_array($_data['info']) ? $_data['info'] : array();
 
@@ -969,7 +1005,7 @@ class wledbe extends eqLogic {
         $mac = self::normalizeMac(isset($info['mac']) ? $info['mac'] : '');
         if ($known !== '' && $mac !== '' && $mac !== $known) {
             $this->noteFailure(sprintf(__('un autre WLED (%s) répond à l\'adresse %s', __FILE__), $mac, $this->getConfiguration('ip')));
-            return;
+            return false;
         }
 
         $this->clearFailure();
@@ -991,7 +1027,10 @@ class wledbe extends eqLogic {
              * changer, les listes sont relues. */
             $signature = $device['version'] . '|' . (isset($info['fxcount']) ? (int) $info['fxcount'] : '') . '|'
                 . (isset($info['palcount']) ? (int) $info['palcount'] : '') . '|' . $this->getConfiguration('layout');
-            if ($this->getCache('lists_sig', '') !== $signature) {
+            /* Un état poussé ne relit pas les listes : quatre requêtes et des
+             * enregistrements bloqueraient le démon. Le relevé de la minute
+             * s'en charge. */
+            if ($_refreshLists && $this->getCache('lists_sig', '') !== $signature) {
                 try {
                     $this->refreshLists();
                     $this->setCache('lists_sig', $signature);
@@ -1002,6 +1041,7 @@ class wledbe extends eqLogic {
         }
         $this->publishValues(self::stateValues($state, $info,
             $this->getCache('fx_names', array()), $this->getCache('pal_names', array())));
+        return true;
     }
 
     public static function mainSegment($_state) {
@@ -1434,6 +1474,28 @@ class wledbe extends eqLogic {
      * caractère. */
     const SEGMENT_NAME_BYTES = 32;
 
+    /*
+     * Texte défilant, tel que WLED saura l'afficher. WLED 0.14 ne dessine que
+     * l'ASCII : une lettre accentuée disparaîtrait. Les accents sont donc
+     * retirés (« ÉCOLE » → « ECOLE »), le reste hors ASCII aussi, puis le
+     * texte est coupé à 32 caractères, la limite de WLED — au-delà, la 0.14
+     * refuse le nom en entier.
+     */
+    public static function sceneText($_text) {
+        $text = (string) $_text;
+        $text = strtr($text, array(
+            'à' => 'a', 'â' => 'a', 'ä' => 'a', 'á' => 'a', 'ã' => 'a', 'å' => 'a', 'À' => 'A', 'Â' => 'A', 'Ä' => 'A', 'Á' => 'A',
+            'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e', 'É' => 'E', 'È' => 'E', 'Ê' => 'E', 'Ë' => 'E',
+            'î' => 'i', 'ï' => 'i', 'í' => 'i', 'Î' => 'I', 'Ï' => 'I', 'Í' => 'I',
+            'ô' => 'o', 'ö' => 'o', 'ó' => 'o', 'õ' => 'o', 'Ô' => 'O', 'Ö' => 'O', 'Ó' => 'O',
+            'ù' => 'u', 'û' => 'u', 'ü' => 'u', 'ú' => 'u', 'Ù' => 'U', 'Û' => 'U', 'Ü' => 'U', 'Ú' => 'U',
+            'ç' => 'c', 'Ç' => 'C', 'ñ' => 'n', 'Ñ' => 'N', 'ÿ' => 'y', 'œ' => 'oe', 'Œ' => 'OE', 'æ' => 'ae', 'Æ' => 'AE', 'ß' => 'ss',
+            '’' => "'", '‘' => "'", '«' => '"', '»' => '"', '“' => '"', '”' => '"', '–' => '-', '—' => '-', '…' => '...', '€' => 'EUR', '°' => 'o',
+        ));
+        $text = preg_replace('/[^\x20-\x7e]/', '', $text);
+        return trim(substr(trim($text), 0, self::SEGMENT_NAME_BYTES));
+    }
+
     public static function normalizeRecipe($_recipe, $_isMatrix) {
         $r = is_array($_recipe) ? $_recipe : array();
         $colors = array();
@@ -1448,7 +1510,7 @@ class wledbe extends eqLogic {
             'brightness' => self::intField($r, 'brightness', 100, 1, 100),
             'speed'      => self::intField($r, 'speed', 128, 0, 255),
             'intensity'  => self::intField($r, 'intensity', 128, 0, 255),
-            'text'       => isset($r['text']) ? trim(mb_strcut(trim(strip_tags((string) $r['text'])), 0, self::SEGMENT_NAME_BYTES, 'UTF-8')) : '',
+            'text'       => isset($r['text']) ? self::sceneText($r['text']) : '',
             'json'       => isset($r['json']) ? trim((string) $r['json']) : '',
         );
         if ($recipe['effect'] === '') {
@@ -1503,6 +1565,12 @@ class wledbe extends eqLogic {
         $names = array();
         foreach ($_scenes as $raw) {
             $scene = self::normalizeScene($raw);
+            /* Le souligné initial est réservé aux scènes fabriquées par le
+             * plugin (texte). */
+            $scene['id'] = ltrim($scene['id'], '_');
+            if ($scene['id'] === '') {
+                $scene['id'] = self::slug($scene['name']);
+            }
             $base = $scene['id'];
             for ($n = 2; isset($ids[$scene['id']]); $n++) {
                 $scene['id'] = $base . '_' . $n;
@@ -1891,6 +1959,9 @@ class wledbe extends eqLogic {
                 'name'     => $scene['name'],
                 'def'      => $scene,
                 'test'     => !empty($_options['test']),
+                /* Scène fabriquée pour l'occasion (texte), hors bibliothèque :
+                 * enregistrer la bibliothèque ne doit pas la retirer. */
+                'adhoc'    => !empty($_options['adhoc']),
                 'priority' => isset($_options['priority']) ? (int) $_options['priority'] : $scene['priority'],
                 'duration' => isset($_options['duration']) ? (int) $_options['duration'] : $scene['duration'],
                 'end'      => isset($_options['end']) ? $_options['end'] : $scene['end'],
@@ -2100,7 +2171,9 @@ class wledbe extends eqLogic {
     public function purgeScenes($_ids) {
         $this->withLock(function () use ($_ids) {
             $stack = $this->stack();
-            $kept = array_values(array_filter($stack, function ($e) use ($_ids) { return !empty($e['test']) || isset($_ids[$e['scene']]); }));
+            $kept = array_values(array_filter($stack, function ($e) use ($_ids) {
+                return !empty($e['test']) || !empty($e['adhoc']) || isset($_ids[$e['scene']]);
+            }));
             if (count($kept) === count($stack)) {
                 return;
             }
@@ -2269,21 +2342,24 @@ class wledbe extends eqLogic {
      *   texte   : ce qui défile (32 octets au plus, la limite de WLED)
      *   options : couleur=rouge  durée=30  vitesse=200  priorité=60  fin=…
      *
-     * Le texte peut porter les jetons de WLED : #HH:#MM pour l'heure, #DD.#MO
-     * pour la date…
+     * Le texte peut être un mot-clé de WLED, seul : #TIME, #HHMM, #DATE,
+     * #DDMM (WLED 0.14). Les versions récentes acceptent aussi des jetons dans
+     * un texte : « Il est #HH:#MM ».
      */
     public function showText($_text, $_options = '') {
         if (!$this->isMatrix()) {
             throw new Exception(__('Le texte défilant ne s\'affiche que sur une matrice.', __FILE__));
         }
-        $text = trim((string) $_text);
+        $text = self::sceneText($_text);
         if ($text === '') {
             throw new Exception(__('Aucun texte à afficher.', __FILE__));
         }
         $options = self::parseSceneOptions($_options, null, true);
         $color = isset($options['color']) ? $options['color'] : '#ffffff';
+        /* Identifiant réservé, qu'aucune scène de la bibliothèque ne peut
+         * prendre (saveScenes() retire le souligné initial). */
         $scene = array(
-            'id' => 'texte', 'name' => __('Texte', __FILE__),
+            'id' => '_texte', 'name' => __('Texte', __FILE__),
             'priority' => isset($options['priority']) ? $options['priority'] : 60,
             'duration' => isset($options['duration']) ? $options['duration'] : 30,
             'end' => isset($options['end']) ? $options['end'] : 'restore', 'guard' => 0,
@@ -2293,6 +2369,7 @@ class wledbe extends eqLogic {
                               'intensity' => 128, 'text' => $text),
         );
         unset($options['color'], $options['speed']);
+        $options['adhoc'] = true;
         return $this->playScene($scene, $options);
     }
 
@@ -2350,7 +2427,7 @@ class wledbe extends eqLogic {
         $eqLogic->setEqType_name(__CLASS__);
         $eqLogic->setName($name);
         $eqLogic->setConfiguration('kind', 'group');
-        $eqLogic->setConfiguration('members', array());
+        $eqLogic->setConfiguration('members', '');
         $eqLogic->setIsEnable(1);
         $eqLogic->setIsVisible(1);
         $eqLogic->setCategory('light', 1);
@@ -2386,6 +2463,25 @@ class wledbe extends eqLogic {
                 $eq->clearFailure();
                 $eq->publishValues(self::stateValues($state, array(), $eq->getCache('fx_names', array()), $eq->getCache('pal_names', array())));
                 $eq->verifyDone(true, $verify ? __('OK', __FILE__) : __('non vérifié', __FILE__));
+                continue;
+            }
+            /* Un ordre relatif (« ~10 », « t ») ne se renvoie jamais : il
+             * s'appliquerait deux fois. On relit seulement l'état. */
+            if (!self::isIdempotent($fragment)) {
+                try {
+                    $eq->publishValues(self::stateValues($eq->call('GET', '/json/state'), array(), $eq->getCache('fx_names', array()), $eq->getCache('pal_names', array())));
+                    $eq->verifyDone(true, __('non vérifié (ordre relatif)', __FILE__));
+                } catch (Throwable $e) {
+                    $errors[] = $eq->getHumanName() . ' : ' . $e->getMessage();
+                }
+                continue;
+            }
+            /* Un membre déjà connu hors ligne n'a pas droit aux relances :
+             * elles feraient attendre le scénario une dizaine de secondes
+             * pour rien. */
+            if ($answers[$id] === null && (int) $eq->getCache('failures', 0) >= self::OFFLINE_AFTER) {
+                $eq->noteFailure(__('pas de réponse', __FILE__));
+                $errors[] = $eq->getHumanName() . ' : ' . __('hors ligne', __FILE__);
                 continue;
             }
             /* Premier envoi perdu ou écart : le chemin complet, avec relecture
@@ -2480,8 +2576,8 @@ class wledbe extends eqLogic {
                     $each(function ($m) { $m->stopScenes(true); });
                     break;
                 case 'text_show':
-                    $text = isset($_options['message']) ? $_options['message'] : '';
-                    $opts = isset($_options['title']) ? $_options['title'] : '';
+                    $text = isset($_options['title']) ? $_options['title'] : '';
+                    $opts = isset($_options['message']) ? $_options['message'] : '';
                     $matrices = array_filter($members, function ($m) { return $m->isMatrix(); });
                     if (empty($matrices)) {
                         throw new Exception(__('Ce groupe ne contient aucune matrice.', __FILE__));
@@ -2549,11 +2645,18 @@ class wledbe extends eqLogic {
     public function refreshGroupLists() {
         $effects = null;
         $palettes = null;
+        /* Les listes des membres eux-mêmes : déjà filtrées (pas d'effet 2D sur
+         * une bande). Un membre dont les listes n'ont pas encore été lues ne
+         * vide pas celles du groupe. */
         foreach ($this->members() as $m) {
-            $fx = array_values(array_filter((array) $m->getCache('fx_names', array()), function ($n) { return $n !== '' && $n !== 'RSVD' && $n !== '-'; }));
-            $pal = array_values((array) $m->getCache('pal_names', array()));
-            $effects = $effects === null ? $fx : array_values(array_intersect($effects, $fx));
-            $palettes = $palettes === null ? $pal : array_values(array_intersect($palettes, $pal));
+            $fx = $m->listLabels('effect_set');
+            $pal = $m->listLabels('palette_set');
+            if (!empty($fx)) {
+                $effects = $effects === null ? $fx : array_values(array_intersect($effects, $fx));
+            }
+            if (!empty($pal)) {
+                $palettes = $palettes === null ? $pal : array_values(array_intersect($palettes, $pal));
+            }
         }
         $effects = array_unique((array) $effects);
         natcasesort($effects);
@@ -2567,6 +2670,33 @@ class wledbe extends eqLogic {
             $list[$name] = $name;
         }
         $this->updateList('palette_set', $list);
+    }
+
+    /* État d'un membre changé (allumé, éteint, en ligne, hors ligne) : ses
+     * groupes recalculent le leur. */
+    private function groupsChanged() {
+        if ($this->isGroup()) {
+            return;
+        }
+        foreach ($this->groups() as $group) {
+            $group->refreshGroup();
+        }
+    }
+
+    /* Libellés d'une commande liste de cet appareil. */
+    public function listLabels($_logicalId) {
+        $cmd = $this->getCmd('action', $_logicalId);
+        $labels = array();
+        if (!is_object($cmd)) {
+            return $labels;
+        }
+        foreach (explode(';', (string) $cmd->getConfiguration('listValue', '')) as $item) {
+            $parts = explode('|', $item, 2);
+            if (isset($parts[1]) && $parts[1] !== '') {
+                $labels[] = $parts[1];
+            }
+        }
+        return $labels;
     }
 
     /* Les groupes dont cet appareil fait partie. */
@@ -2610,7 +2740,9 @@ class wledbe extends eqLogic {
             case 'scene_stop_all':
                 return $this->stopScenes(true);
             case 'text_show':
-                return $this->showText(isset($_options['message']) ? $_options['message'] : '', isset($_options['title']) ? $_options['title'] : '');
+                /* Comme « Lancer une scène » : ce qu'on affiche en titre, les
+                 * options en message. */
+                return $this->showText(isset($_options['title']) ? $_options['title'] : '', isset($_options['message']) ? $_options['message'] : '');
             case 'toggle':
                 /* « on »:"t" ne se vérifie pas : on lit l'état et on envoie
                  * l'inverse, explicitement. */
@@ -2764,8 +2896,16 @@ class wledbe extends eqLogic {
 
     private function addTextCommand() {
         $this->addCmdIfMissing('text_show', 'Afficher un texte', 'action', 'message', array('order' => 210,
-            'display' => array('title_placeholder' => 'couleur=rouge durée=30 vitesse=200',
-                               'message_placeholder' => __('Texte à faire défiler (32 caractères au plus)', __FILE__))));
+            'display' => array('title_placeholder' => __('Texte à faire défiler (32 caractères)', __FILE__),
+                               'message_placeholder' => 'couleur=rouge durée=30 vitesse=200')));
+        /* La 0.3 avait les deux champs dans l'autre sens : on remet les
+         * indications d'aplomb. */
+        $cmd = $this->getCmd('action', 'text_show');
+        if (is_object($cmd) && $cmd->getDisplay('title_placeholder', '') === 'couleur=rouge durée=30 vitesse=200') {
+            $cmd->setDisplay('title_placeholder', __('Texte à faire défiler (32 caractères)', __FILE__));
+            $cmd->setDisplay('message_placeholder', 'couleur=rouge durée=30 vitesse=200');
+            $cmd->save();
+        }
     }
 
     /* Un groupe n'a pas d'état propre à relire : seulement ce qui se déduit
@@ -2906,9 +3046,7 @@ class wledbe extends eqLogic {
             $seen = $_values['on'] ? 'on' : 'off';
             if ($this->getCache('group_on_seen', '') !== $seen) {
                 $this->setCache('group_on_seen', $seen);
-                foreach ($this->groups() as $group) {
-                    $group->refreshGroup();
-                }
+                $this->groupsChanged();
             }
         }
     }
@@ -2933,6 +3071,10 @@ class wledbe extends eqLogic {
         $this->setCache('failures', $failures);
         $this->setCache('problem', $_message);
         $this->publishCmd('online', 0);
+        /* Premier échec : « Membres en ligne » des groupes change. */
+        if ($failures === 1) {
+            $this->groupsChanged();
+        }
         /* Un seul avertissement par panne : un journal qui répète la même
          * ligne chaque minute ne se lit plus. */
         log::add(__CLASS__, $failures === self::OFFLINE_AFTER ? 'warning' : 'debug', $this->getHumanName() . ' : ' . $_message);
@@ -2948,6 +3090,9 @@ class wledbe extends eqLogic {
             $this->setCache('problem', '');
         }
         $this->publishCmd('online', 1);
+        if ($failures > 0) {
+            $this->groupsChanged();
+        }
     }
 
     /* Le démon dit à chaque relecture du planning quels appareils lui sont
@@ -2966,7 +3111,22 @@ class wledbe extends eqLogic {
                 $members[] = array('name' => $m->getHumanName(), 'online' => is_object($cmd) && (int) $cmd->execCmd() === 1,
                                    'on' => $m->isOn(false), 'matrix' => $m->isMatrix());
             }
-            return array('id' => $this->getId(), 'group' => true, 'members' => $members);
+            /* Membres cochés mais ignorés, avec la raison : un groupe dont tous
+             * les membres sont désactivés ne doit pas avoir l'air vide. */
+            $inactive = array();
+            $active = array_map(function ($m) { return (int) $m->getId(); }, $this->members());
+            foreach (self::parseMembers($this->getConfiguration('members', '')) as $id) {
+                if (in_array($id, $active, true)) {
+                    continue;
+                }
+                $eq = self::byId($id);
+                $inactive[] = array(
+                    'name'   => is_object($eq) ? $eq->getHumanName() : '#' . $id,
+                    'reason' => !is_object($eq) ? __('supprimé', __FILE__)
+                        : (!$eq->getIsEnable() ? __('désactivé', __FILE__) : __('sans adresse IP', __FILE__)),
+                );
+            }
+            return array('id' => $this->getId(), 'group' => true, 'members' => $members, 'inactive' => $inactive);
         }
         return array(
             'id'        => $this->getId(),

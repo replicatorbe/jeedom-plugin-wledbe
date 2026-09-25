@@ -215,15 +215,26 @@ function wledbeMembersToInput() {
   if (typeof jeeFrontEnd !== 'undefined') { jeeFrontEnd.modifyWithoutSave = true }
 }
 
+/* Coche les membres enregistrés et remplit le champ caché : le coeur vide
+   tous les champs avant de les remplir, et ne sait pas mettre une liste dans
+   un champ texte. Sans cette écriture, enregistrer le groupe sans toucher aux
+   cases enverrait une liste vide et effacerait ses membres. */
 function wledbeMembersFromConf(_members) {
   var ids = {}
   var list = Array.isArray(_members) ? _members : String(_members || '').split(',')
-  list.forEach(function (_id) { ids[String(_id).trim()] = true })
+  var kept = []
+  list.forEach(function (_id) {
+    var id = String(_id).trim()
+    if (id !== '') {
+      ids[id] = true
+      kept.push(id)
+    }
+  })
   document.querySelectorAll('.wledbeMember').forEach(function (_box) {
     _box.checked = ids[_box.getAttribute('data-id')] === true
-    /* Un groupe ne se contient pas lui-même. */
-    _box.closest('.checkbox').style.display = (_box.getAttribute('data-id') === String(wledbeCurrentId())) ? 'none' : ''
   })
+  var input = wledbeEl('in_wledbeMembers')
+  if (input !== null) { input.value = kept.join(',') }
 }
 
 function wledbeRenderMembers(_data) {
@@ -238,8 +249,9 @@ function wledbeRenderMembers(_data) {
     state.className = 'alert alert-info'
     state.textContent = _data.members.length + ' {{membre(s) actif(s)}}'
   }
-  if (_data.members.length === 0) {
-    div.innerHTML = '<p class="text-muted">{{Aucun membre actif : cochez des WLED dans l\'onglet Équipement.}}</p>'
+  var all = (_data.members || []).concat(_data.inactive || [])
+  if (all.length === 0) {
+    div.innerHTML = '<p class="text-muted">{{Aucun membre : cochez des WLED dans l\'onglet Équipement, puis enregistrez.}}</p>'
     return
   }
   var html = '<table class="table table-condensed"><thead><tr><th>{{Membre}}</th><th>{{En ligne}}</th><th>{{Allumé}}</th></tr></thead><tbody>'
@@ -247,6 +259,9 @@ function wledbeRenderMembers(_data) {
     html += '<tr><td>' + wledbeEscape(_m.name) + (_m.matrix ? ' <span class="label label-info">{{matrice}}</span>' : '') + '</td>'
     html += '<td>' + (_m.online ? '<span class="label label-success">{{oui}}</span>' : '<span class="label label-danger">{{non}}</span>') + '</td>'
     html += '<td>' + (_m.on ? '{{oui}}' : '{{non}}') + '</td></tr>'
+  })
+  ;(_data.inactive || []).forEach(function (_m) {
+    html += '<tr class="text-muted"><td>' + wledbeEscape(_m.name) + '</td><td colspan="2"><span class="label label-default">' + wledbeEscape(_m.reason) + '</span> {{ignoré par le groupe}}</td></tr>'
   })
   div.innerHTML = html + '</tbody></table>'
 }
@@ -698,15 +713,19 @@ function addCmdToTable(_cmd) {
    réexécuté à chaque visite de la page. Un seul écouteur, posé une fois sur le
    document, qui résout les fonctions au moment du clic : elles sont
    redéfinies à chaque chargement. */
-if (!window.wledbeListening) {
-  window.wledbeListening = true
-  document.addEventListener('click', function (_event) {
+/* Les gestionnaires sont redéfinis à chaque chargement de la page : une mise
+   à jour du plugin qui ajoute un bouton est prise en compte sans recharger
+   l'onglet. Les écouteurs, eux, ne sont posés qu'une fois sur le document et
+   appellent ces gestionnaires au moment de l'événement. */
+window.wledbeHandlers = {
+  click: function (_event) {
     var target = _event.target
     if (target === null || typeof target.closest !== 'function') { return }
     var actions = {
       bt_wledbeDiscover: wledbeDiscover,
       bt_wledbeAddIp: wledbeAddIp,
       bt_wledbeRefresh: wledbeRefresh,
+      bt_wledbeGroupRefresh: wledbeRefresh,
       bt_wledbeLists: wledbeLists,
       bt_wledbeScenes: wledbeScenesToggle,
       bt_wledbeAddGroup: wledbeAddGroup,
@@ -726,16 +745,30 @@ if (!window.wledbeListening) {
         return
       }
     }
-  })
-  document.addEventListener('change', function (_event) {
+  },
+  change: function (_event) {
     if (_event.target && _event.target.classList && _event.target.classList.contains('wledbeMember')) {
       wledbeMembersToInput()
     }
-  })
+  },
   /* Toute saisie dans l'éditeur de scènes le marque comme modifié. */
-  document.addEventListener('input', function (_event) {
+  input: function (_event) {
     if (_event.target && typeof _event.target.closest === 'function' && _event.target.closest('#div_wledbeSceneList') !== null) {
       wledbeSetDirty(true)
     }
+  }
+}
+
+/* Un onglet ouvert avant la version 0.3 a déjà l'ancien écouteur (drapeau
+   wledbeListening) : on ne pose pas le nouveau par-dessus, qui ferait
+   exécuter deux fois chaque bouton. Un rechargement de l'onglet suffit. */
+if (!window.wledbeListening && !window.wledbeListeningV2) {
+  window.wledbeListeningV2 = true
+  ;['click', 'change', 'input'].forEach(function (_type) {
+    document.addEventListener(_type, function (_event) {
+      if (window.wledbeHandlers && typeof window.wledbeHandlers[_type] === 'function') {
+        window.wledbeHandlers[_type](_event)
+      }
+    })
   })
 }

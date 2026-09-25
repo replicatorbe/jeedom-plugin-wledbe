@@ -1,5 +1,28 @@
 # Changelog — plugin WLED
 
+## 0.3.1 (beta)
+
+Relecture de la 0.3, corrections :
+
+- Groupes : enregistrer un groupe sans toucher à ses cases n'efface plus ses
+  membres ; un membre hors ligne ne fait plus attendre le scénario ; un ordre
+  relatif n'est jamais appliqué deux fois ; listes d'effets du groupe fidèles
+  à celles des membres (pas d'effet 2D pour une bande) ; état et « Membres en
+  ligne » à jour quand un membre tombe, revient, est désactivé ou supprimé ;
+  membres ignorés affichés avec leur raison.
+- Texte : titre et message dans le même ordre que « Lancer une scène » (le
+  texte en titre) ; accents retirés, que WLED 0.14 n'affiche pas ; mots-clés
+  d'heure et de date documentés tels que la 0.14 les connaît ; un texte en
+  cours ou programmé survit à l'enregistrement des scènes.
+- Démon : connexions directes gardées pendant un long réveil ; reconnexions
+  espacées quand un appareil accepte puis ferme (trop de clients sur un
+  ESP8266) ; écritures partielles et poignée de main vérifiées ; états poussés
+  gardés si Jeedom ne répond pas ; port de l'appareil respecté ; démon
+  prévenu aussitôt d'un appareil ajouté ou d'un réglage changé.
+- Page : balise en trop qui décalait la page de l'équipement ; nouveaux
+  boutons actifs sans recharger l'onglet (une fois cette version chargée :
+  **rechargez l'onglet du plugin une fois** après la mise à jour).
+
 ## 0.3 (beta)
 
 - Groupes : un équipement qui pilote plusieurs WLED d'un seul ordre, envoyé

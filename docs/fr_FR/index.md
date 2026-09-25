@@ -260,15 +260,21 @@ membres dans l'onglet Équipement et enregistrez. Un même WLED peut appartenir
 
 Le groupe reçoit les commandes d'une lumière (allumer, éteindre, basculer,
 luminosité, couleur, effet, palette, vitesse, intensité, état JSON), les
-commandes de scène et « Afficher un texte ». Chaque ordre part vers **tous les
-membres en même temps**, pour que les lampes changent ensemble, puis chaque
-membre est vérifié et relancé s'il le faut, comme s'il avait été commandé seul.
+commandes de scène et « Afficher un texte ».
+
+Les commandes de lumière partent vers **tous les membres en même temps**, pour
+que les lampes changent ensemble ; chaque membre est ensuite vérifié et relancé
+s'il le faut, comme s'il avait été commandé seul. Un membre déjà connu hors
+ligne n'a pas droit aux relances : il ne fait pas attendre le scénario. Les
+scènes et le texte, eux, sont lancés membre par membre.
+
 Si un membre échoue, les autres sont servis quand même ; la commande
 **Vérification** du groupe passe à 0 et **Dernière vérification** dit lequel.
 
 - **Choisir un effet** et **Choisir une palette** ne proposent que ce que
-  **tous** les membres connaissent, par leur nom : chacun le joue avec son
-  propre numéro.
+  **tous** les membres proposent eux-mêmes, par leur nom : chacun le joue avec
+  son propre numéro. Un groupe qui contient une bande n'offre donc pas les
+  effets réservés aux matrices.
 - **Basculer** éteint tout si un seul membre est allumé, allume tout sinon :
   les lampes finissent d'accord.
 - Une **scène** lancée sur le groupe est lancée sur chaque membre, dans sa
@@ -277,14 +283,15 @@ Si un membre échoue, les autres sont servis quand même ; la commande
 - Infos : **Etat** (allumé si au moins un membre l'est), **Membres en ligne**
   (`2/3`).
 
-Un membre désactivé est ignoré. L'onglet Diagnostic du groupe liste ses
-membres, en ligne ou non, allumés ou non.
+Un membre désactivé, supprimé ou sans adresse est ignoré. L'onglet Diagnostic
+du groupe liste ses membres, en ligne ou non, allumés ou non, et ceux qui sont
+ignorés avec la raison ; **Actualiser l'état des membres** le met à jour.
 
 ## Texte sur une matrice
 
 Sur une matrice, la commande **Afficher un texte** fait défiler un texte, le
-temps voulu, puis rend l'affichage d'avant. Le texte va dans le **message**,
-les options dans le **titre** :
+temps voulu, puis rend l'affichage d'avant. Comme pour « Lancer une scène »,
+ce qu'on affiche va dans le **titre**, les options dans le **message** :
 
 | Option | Exemple | Par défaut |
 |---|---|---|
@@ -292,13 +299,21 @@ les options dans le **titre** :
 | durée | `durée=30`, `durée=2m`, `durée=0` (sans fin) | 30 s |
 | vitesse | `vitesse=200` (0 à 255) | 128 |
 | priorité | `priorité=90` | 60 |
+| délai | `délai=10` | tout de suite |
+| heure | `heure=7:00` | tout de suite |
 | fin | `fin=éteindre` | rendre l'affichage |
 
 Couleurs nommées : rouge, vert, bleu, blanc, jaune, orange, violet, rose,
 cyan, magenta.
 
-Le texte accepte les jetons de WLED : `#HH:#MM` pour l'heure, `#DD.#MO` pour la
-date, etc. WLED limite le texte à **32 caractères** (moins avec des accents).
+WLED limite le texte à **32 caractères** et, sur la version 0.14, ne dessine
+que les caractères sans accent : le plugin retire donc les accents
+(« École » devient « Ecole ») et les caractères qu'il ne saurait pas afficher.
+
+Pour afficher l'heure ou la date, le texte peut être un mot-clé de WLED, seul :
+`#TIME`, `#HHMM`, `#DATE`, `#DDMM`, `#MMDD`. Les versions récentes de WLED
+acceptent aussi des jetons au milieu d'un texte (`Il est #HH:#MM`) ; la 0.14
+les afficherait tels quels.
 
 C'est une scène comme une autre : elle prend sa place dans la pile, recouvre
 une scène moins prioritaire, et une alarme la recouvre.
@@ -311,20 +326,23 @@ autre système. Les commandes info de Jeedom suivent en une à deux secondes,
 au lieu d'attendre le relevé de la minute. Une scène **sous garde** défaite
 est réimposée aussitôt, sans attendre son tour de garde.
 
-L'onglet Diagnostic dit si l'appareil est connecté en direct. Si la connexion
-tombe (WLED éteint, Wi-Fi perdu), le démon la rétablit tout seul en espaçant
-ses essais, et le relevé de la minute continue entre-temps : rien ne se perd.
+L'onglet Diagnostic dit si l'appareil est connecté en direct (l'information
+peut avoir une minute de retard juste après le démarrage du démon). Si la
+connexion tombe (WLED éteint, Wi-Fi perdu), le démon la rétablit tout seul en
+espaçant ses essais jusqu'à deux minutes, et le relevé de la minute continue
+entre-temps : rien ne se perd.
 
-Un ESP8266 n'accepte que quelques connexions WebSocket, interface web de WLED
-comprise. Si celle-ci se déconnecte souvent, décochez **État instantané**
-dans la configuration du plugin.
+Un ESP8266 n'accepte que trois connexions WebSocket, interface web de WLED et
+applis comprises, et ferme la plus ancienne au-delà. Si l'interface de WLED se
+déconnecte souvent, ou si le journal du démon signale des connexions perdues
+en boucle, décochez **État instantané** dans la configuration du plugin.
 
 ## Configuration du plugin
 
 - **Délai d'attente des requêtes** : 3 secondes par défaut.
+- **Essais par ordre** : 3 par défaut.
 - **État instantané** : connexion directe du démon à chaque WLED (cochée par
   défaut).
-- **Essais par ordre** : 3 par défaut.
 - **Surveiller le réseau** : écoute mDNS horaire, qui corrige les adresses et
   signale les nouveaux WLED.
 - **Créer les nouveaux WLED automatiquement** : crée l'équipement au lieu de le

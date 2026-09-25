@@ -124,17 +124,41 @@ function wlRefused($_code) {
     }
 }
 
-function wlSchedule($_connected) {
-    $ch = wlHandle('action=schedule&connected=' . implode(',', $_connected));
-    $answer = curl_exec($ch);
-    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error = curl_error($ch);
-    curl_close($ch);
-    wlRefused($code);
-    if ($answer === false || $code !== 200) {
-        return array(null, 'HTTP ' . $code . ' ' . $error);
+/*
+ * Exécute des requêtes vers Jeedom en continuant de servir les WebSocket :
+ * un réveil peut durer (ordres vérifiés vers un WLED lent), et pendant ce
+ * temps les connexions doivent être lues — sans quoi les états poussés
+ * s'accumulent et la connexion passe pour morte.
+ */
+function wlRun($_handles) {
+    $multi = curl_multi_init();
+    foreach ($_handles as $ch) {
+        curl_multi_add_handle($multi, $ch);
     }
-    $schedule = json_decode($answer, true);
+    do {
+        $status = curl_multi_exec($multi, $active);
+        if ($active) {
+            wsPoll(0.05);
+        }
+    } while ($active && $status == CURLM_OK);
+    $out = array();
+    foreach ($_handles as $key => $ch) {
+        $out[$key] = array('code' => (int) curl_getinfo($ch, CURLINFO_HTTP_CODE),
+                           'body' => curl_multi_getcontent($ch), 'error' => curl_error($ch));
+        curl_multi_remove_handle($multi, $ch);
+        curl_close($ch);
+    }
+    curl_multi_close($multi);
+    return $out;
+}
+
+function wlSchedule($_connected) {
+    $r = wlRun(array(wlHandle('action=schedule&connected=' . implode(',', $_connected))))[0];
+    wlRefused($r['code']);
+    if ($r['code'] !== 200 || !is_string($r['body'])) {
+        return array(null, 'HTTP ' . $r['code'] . ' ' . $r['error']);
+    }
+    $schedule = json_decode($r['body'], true);
     if (!is_array($schedule) || !isset($schedule['timers']) || !is_array($schedule['timers'])) {
         return array(null, 'planning illisible');
     }
@@ -144,31 +168,18 @@ function wlSchedule($_connected) {
 /* Réveille plusieurs appareils en parallèle : un WLED muet, dont le réveil
  * dure le temps de ses relances, ne retarde pas les autres. */
 function wlTick($_eqs) {
-    $multi = curl_multi_init();
     $handles = array();
     foreach ($_eqs as $eq => $name) {
         wlLog('debug', 'Réveil de ' . $name);
         $handles[$eq] = wlHandle('action=tick&eq=' . (int) $eq);
-        curl_multi_add_handle($multi, $handles[$eq]);
     }
-    do {
-        $status = curl_multi_exec($multi, $active);
-        if ($active && curl_multi_select($multi, 0.5) === -1) {
-            usleep(20000);
+    foreach (wlRun($handles) as $eq => $r) {
+        if ($r['code'] !== 200) {
+            wlLog('warning', 'Réveil de ' . $_eqs[$eq] . ' en échec (HTTP ' . $r['code'] . ') ' . $r['error']);
         }
-    } while ($active && $status == CURLM_OK);
-    foreach ($handles as $eq => $ch) {
-        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        if ($code !== 200) {
-            wlLog('warning', 'Réveil de ' . $_eqs[$eq] . ' en échec (HTTP ' . $code . ') ' . curl_error($ch));
-        }
-        curl_multi_remove_handle($multi, $ch);
-        curl_close($ch);
-        wlRefused($code);
+        wlRefused($r['code']);
     }
-    curl_multi_close($multi);
 }
-
 
 /* ------------------------------------------------------------ WEBSOCKET */
 
@@ -180,14 +191,26 @@ function wlTick($_eqs) {
  * son tour de garde. Le relevé de chaque minute reste en place : si la
  * connexion tombe, rien ne se perd.
  *
- * Un client WebSocket minimal : poignée de main HTTP, trames texte
- * fragmentées réassemblées, ping/pong, fermeture. Les trames envoyées par un
- * client doivent être masquées (RFC 6455).
+ * Un client WebSocket minimal (RFC 6455) : poignée de main HTTP, trames texte
+ * fragmentées réassemblées, ping/pong, fermeture. Les trames d'un client sont
+ * masquées. Tout ce qui s'écrit passe par un tampon de sortie, vidé quand la
+ * connexion est prête : une socket non bloquante peut n'accepter qu'une
+ * partie d'une écriture.
+ *
+ * WLED ne parle que quand son état change, et un ESP8266 ferme le plus
+ * ancien de ses clients WebSocket au-delà de trois : le démon envoie un ping
+ * toutes les trente secondes pour s'assurer que la connexion vit.
  */
 
 $live = array();      /* [eq] => connexion */
 $pushes = array();    /* [eq] => dernier état reçu, pas encore transmis */
 $pushedAt = -INF;
+$pushRetryAt = -INF;
+$pushFailures = 0;
+
+/* Une connexion n'est jugée stable qu'après ce temps : un appareil qui
+ * accepte puis ferme aussitôt (trop de clients) voit ses essais s'espacer. */
+const WS_STABLE = 60;
 
 function wsFrame($_opcode, $_payload) {
     $len = strlen($_payload);
@@ -207,30 +230,59 @@ function wsFrame($_opcode, $_payload) {
     return $head . $mask . $masked;
 }
 
+function wsSend(&$_c, $_data) {
+    $_c['out'] .= $_data;
+    wsWrite($_c);
+}
+
+/* Écrit ce que la socket accepte ; le reste attend le tour suivant. Une
+ * écriture refusée dès la poignée de main, c'est une connexion refusée : la
+ * connexion non bloquante se dit prête même quand elle a échoué. */
+function wsWrite(&$_c) {
+    if ($_c['out'] === '' || !is_resource($_c['sock'])) {
+        return;
+    }
+    $n = @fwrite($_c['sock'], $_c['out']);
+    if ($n === false) {
+        wsClose($_c, $_c['state'] === 'handshake' ? 'connexion refusée' : 'écriture impossible');
+        return;
+    }
+    $_c['out'] = (string) substr($_c['out'], $n);
+}
+
 function wsClose(&$_c, $_why) {
-    global $live;
     if (is_resource($_c['sock'])) {
-        @fwrite($_c['sock'], wsFrame(8, ''));
+        if ($_c['state'] === 'open') {
+            @fwrite($_c['sock'], wsFrame(8, ''));
+        }
         @fclose($_c['sock']);
     }
-    $wasOpen = $_c['state'] === 'open';
+    $clock = wlClock();
+    $stable = $_c['state'] === 'open' && $clock - $_c['openedAt'] >= WS_STABLE;
+    /* Une connexion qui a tenu repart de zéro ; une qui tombe aussitôt
+     * ouverte, ou qui ne s'ouvre pas, espace ses essais jusqu'à deux
+     * minutes. */
+    $_c['fails'] = $stable ? 1 : $_c['fails'] + 1;
     $_c['sock'] = null;
     $_c['state'] = 'idle';
     $_c['buf'] = '';
     $_c['frag'] = '';
-    $_c['fails']++;
-    $_c['next'] = wlClock() + min(120, 5 * (1 << min(5, $_c['fails'] - 1)));
-    /* Une ligne par coupure, pas une par tentative : un WLED éteint pour la
-     * nuit ne doit pas remplir le journal. */
-    if ($wasOpen || $_c['fails'] === 1) {
-        wlLog($wasOpen ? 'info' : 'debug', 'Connexion directe à ' . $_c['name'] . ' perdue (' . $_why . ')');
+    $_c['out'] = '';
+    $_c['next'] = $clock + min(120, 5 * (1 << min(5, $_c['fails'] - 1)));
+    /* Une ligne par panne, pas une par tentative. */
+    if (!$_c['down']) {
+        $_c['down'] = true;
+        wlLog('info', 'Connexion directe à ' . $_c['name'] . ' perdue (' . $_why . '), état relu chaque minute en attendant');
+    } else {
+        wlLog('debug', 'Connexion directe à ' . $_c['name'] . ' : ' . $_why);
     }
 }
 
 function wsConnect(&$_c) {
-    $sock = @stream_socket_client('tcp://' . $_c['ip'] . ':80', $errno, $error, 0,
+    $sock = @stream_socket_client('tcp://' . $_c['ip'] . ':' . $_c['port'], $errno, $error, 0,
         STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT);
     if ($sock === false) {
+        $_c['state'] = 'connecting';
         wsClose($_c, $error !== '' ? $error : 'connexion impossible');
         return;
     }
@@ -240,11 +292,24 @@ function wsConnect(&$_c) {
     $_c['deadline'] = wlClock() + 5;
 }
 
+/* Poignée de main : la clé envoyée, et la réponse qu'elle doit produire. */
+function wsHandshake(&$_c) {
+    $key = base64_encode(random_bytes(16));
+    $_c['accept'] = base64_encode(sha1($key . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', true));
+    $_c['state'] = 'handshake';
+    $_c['last'] = wlClock();
+    wsSend($_c, "GET /ws HTTP/1.1\r\nHost: " . $_c['ip'] . "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        . "Sec-WebSocket-Key: " . $key . "\r\nSec-WebSocket-Version: 13\r\n\r\n");
+}
+
 /* Lit ce qui est arrivé ; rend les messages texte complets. */
 function wsRead(&$_c) {
     $chunk = @fread($_c['sock'], 65536);
     if ($chunk === false || ($chunk === '' && feof($_c['sock']))) {
         wsClose($_c, 'fermée par l\'appareil');
+        return array();
+    }
+    if ($chunk === '') {
         return array();
     }
     $_c['buf'] .= $chunk;
@@ -254,19 +319,24 @@ function wsRead(&$_c) {
     if ($_c['state'] === 'handshake') {
         $end = strpos($_c['buf'], "\r\n\r\n");
         if ($end === false) {
+            if (strlen($_c['buf']) > 8192) {
+                wsClose($_c, 'réponse illisible');
+            }
             return array();
         }
-        $status = strtok($_c['buf'], "\r\n");
-        if (strpos($status, ' 101') === false) {
-            wsClose($_c, 'refusée : ' . $status);
+        $head = substr($_c['buf'], 0, $end);
+        if (!preg_match('#^HTTP/1\.[01] 101 #', $head)
+            || !preg_match('/^Sec-WebSocket-Accept:\s*(\S+)/mi', $head, $m) || $m[1] !== $_c['accept']) {
+            wsClose($_c, 'refusée : ' . strtok($head, "\r\n"));
             return array();
         }
-        $_c['buf'] = substr($_c['buf'], $end + 4);
+        $_c['buf'] = (string) substr($_c['buf'], $end + 4);
         $_c['state'] = 'open';
-        if ($_c['fails'] > 0) {
-            wlLog('info', 'Connexion directe à ' . $_c['name'] . ' établie');
-        }
-        $_c['fails'] = 0;
+        $_c['openedAt'] = wlClock();
+        $_c['pingAt'] = wlClock();
+        /* Le retour n'est annoncé qu'une fois la connexion stable (voir
+         * wsPoll) : un appareil qui accepte puis ferme aussitôt ne doit pas
+         * écrire deux lignes par essai. */
     }
 
     while (strlen($_c['buf']) >= 2) {
@@ -287,20 +357,20 @@ function wsRead(&$_c) {
             $len = unpack('J', substr($_c['buf'], 2, 8))[1];
             $off = 10;
         }
+        if ($len < 0 || $len > 1048576) {
+            wsClose($_c, 'trame démesurée');
+            return array();
+        }
         /* Un serveur ne masque pas ses trames ; si c'était le cas, la clé
          * suivrait la longueur. */
         $masked = ($b2 & 128) !== 0;
         if ($masked) {
             $off += 4;
         }
-        if ($len > 1048576) {
-            wsClose($_c, 'trame démesurée');
-            return array();
-        }
         if (strlen($_c['buf']) < $off + $len) {
             break;
         }
-        $payload = substr($_c['buf'], $off, $len);
+        $payload = (string) substr($_c['buf'], $off, $len);
         if ($masked) {
             $mask = substr($_c['buf'], $off - 4, 4);
             for ($i = 0; $i < $len; $i++) {
@@ -311,24 +381,32 @@ function wsRead(&$_c) {
         $opcode = $b1 & 15;
         $fin = ($b1 & 128) !== 0;
         switch ($opcode) {
-            case 0:   /* suite d'un message fragmenté */
-            case 1:   /* texte */
-                $_c['frag'] = ($opcode === 1 ? '' : $_c['frag']) . $payload;
-                if (strlen($_c['frag']) > 1048576) {
-                    wsClose($_c, 'message démesuré');
-                    return array();
-                }
-                if ($fin) {
-                    $messages[] = $_c['frag'];
-                    $_c['frag'] = '';
-                }
+            case 1:   /* début d'un message texte */
+            case 2:   /* début d'un message binaire, ignoré */
+                $_c['fragOp'] = $opcode;
+                $_c['frag'] = $payload;
+                break;
+            case 0:   /* suite du message en cours */
+                $_c['frag'] .= $payload;
                 break;
             case 8:   /* fermeture */
                 wsClose($_c, 'fermée par l\'appareil');
                 return $messages;
             case 9:   /* ping : on répond pong, avec le même contenu */
-                @fwrite($_c['sock'], wsFrame(10, $payload));
-                break;
+                wsSend($_c, wsFrame(10, $payload));
+                continue 2;
+            default:  /* pong, ou opcode inconnu */
+                continue 2;
+        }
+        if (strlen($_c['frag']) > 1048576) {
+            wsClose($_c, 'message démesuré');
+            return array();
+        }
+        if ($fin) {
+            if ($_c['fragOp'] === 1) {
+                $messages[] = $_c['frag'];
+            }
+            $_c['frag'] = '';
         }
     }
     return $messages;
@@ -340,27 +418,32 @@ function wsSync($_wanted) {
     $seen = array();
     foreach ($_wanted as $device) {
         $eq = (int) $device['eq'];
+        $port = isset($device['port']) ? (int) $device['port'] : 80;
         $seen[$eq] = true;
-        if (isset($live[$eq]) && $live[$eq]['ip'] !== $device['ip']) {
+        if (isset($live[$eq]) && ($live[$eq]['ip'] !== $device['ip'] || $live[$eq]['port'] !== $port)) {
             wsClose($live[$eq], 'adresse changée');
             unset($live[$eq]);
         }
         if (!isset($live[$eq])) {
-            $live[$eq] = array('ip' => $device['ip'], 'name' => $device['name'], 'sock' => null, 'state' => 'idle',
-                               'buf' => '', 'frag' => '', 'fails' => 0, 'next' => wlClock(), 'last' => wlClock(), 'pingAt' => wlClock());
+            $live[$eq] = array('ip' => $device['ip'], 'port' => $port, 'name' => $device['name'], 'sock' => null,
+                               'state' => 'idle', 'buf' => '', 'frag' => '', 'fragOp' => 1, 'out' => '', 'accept' => '',
+                               'fails' => 0, 'down' => false, 'next' => wlClock(), 'last' => wlClock(),
+                               'pingAt' => wlClock(), 'openedAt' => 0, 'deadline' => 0);
         }
     }
     foreach (array_keys($live) as $eq) {
         if (!isset($seen[$eq])) {
-            wsClose($live[$eq], 'retiré');
+            if (is_resource($live[$eq]['sock'])) {
+                @fclose($live[$eq]['sock']);
+            }
             unset($live[$eq]);
         }
     }
 }
 
-/* Un tour de WebSocket : connexions, lectures, pings. Attend au plus
- * $_timeout secondes qu'il se passe quelque chose : c'est aussi le rythme de
- * la boucle principale. */
+/* Un tour de WebSocket : connexions, écritures en attente, lectures, pings.
+ * Attend au plus $_timeout secondes qu'il se passe quelque chose : c'est
+ * aussi le rythme de la boucle principale. */
 function wsPoll($_timeout) {
     global $live, $pushes;
     $clock = wlClock();
@@ -377,17 +460,17 @@ function wsPoll($_timeout) {
             }
             $write[$eq] = $c['sock'];
         } elseif ($c['state'] === 'handshake' || $c['state'] === 'open') {
-            /* Un WLED muet depuis trop longtemps (Wi-Fi perdu sans fermeture
-             * propre) : on raccroche pour se reconnecter. */
-            if ($clock - $c['last'] > 75) {
-                wsClose($c, 'silence');
-                continue;
-            }
             if ($c['state'] === 'open' && $clock - $c['pingAt'] > 30) {
                 $c['pingAt'] = $clock;
-                @fwrite($c['sock'], wsFrame(9, 'jeedom'));
+                wsSend($c, wsFrame(9, 'jeedom'));
+                if ($c['state'] !== 'open') {
+                    continue;
+                }
             }
             $read[$eq] = $c['sock'];
+            if ($c['out'] !== '') {
+                $write[$eq] = $c['sock'];
+            }
         }
     }
     unset($c);
@@ -399,38 +482,43 @@ function wsPoll($_timeout) {
     $w = array_values($write);
     $e = null;
     $n = @stream_select($r, $w, $e, 0, (int) ($_timeout * 1000000));
-    if ($n === false || $n === 0) {
-        return;
-    }
-    foreach ($write as $eq => $sock) {
-        if (!in_array($sock, $w, true)) {
-            continue;
+    if ($n !== false && $n > 0) {
+        foreach ($write as $eq => $sock) {
+            if (!in_array($sock, $w, true) || !isset($live[$eq]) || $live[$eq]['sock'] !== $sock) {
+                continue;
+            }
+            if ($live[$eq]['state'] === 'connecting') {
+                wsHandshake($live[$eq]);
+            } else {
+                wsWrite($live[$eq]);
+            }
         }
-        $c = &$live[$eq];
-        $key = base64_encode(random_bytes(16));
-        $request = "GET /ws HTTP/1.1\r\nHost: " . $c['ip'] . "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                 . "Sec-WebSocket-Key: " . $key . "\r\nSec-WebSocket-Version: 13\r\n\r\n";
-        if (@fwrite($sock, $request) === false) {
-            wsClose($c, 'connexion refusée');
-        } else {
-            $c['state'] = 'handshake';
-            $c['last'] = wlClock();
-            $c['pingAt'] = wlClock();
-        }
-        unset($c);
-    }
-    foreach ($read as $eq => $sock) {
-        if (!in_array($sock, $r, true)) {
-            continue;
-        }
-        foreach (wsRead($live[$eq]) as $message) {
-            /* Seul l'état intéresse le plugin ; le dernier reçu suffit. */
-            $data = json_decode($message, true);
-            if (is_array($data) && isset($data['state'])) {
-                $pushes[$eq] = $message;
+        foreach ($read as $eq => $sock) {
+            if (!in_array($sock, $r, true) || !isset($live[$eq]) || $live[$eq]['sock'] !== $sock) {
+                continue;
+            }
+            foreach (wsRead($live[$eq]) as $message) {
+                /* Seul l'état intéresse le plugin ; le dernier reçu suffit. */
+                $data = json_decode($message, true);
+                if (is_array($data) && isset($data['state'])) {
+                    $pushes[$eq] = $message;
+                }
             }
         }
     }
+    /* Le silence se juge après la lecture : ce qui attendait dans la socket
+     * vient d'être lu. Avec un ping toutes les trente secondes, un appareil
+     * vivant répond toujours avant. */
+    $clock = wlClock();
+    foreach ($live as $eq => &$c) {
+        if (($c['state'] === 'handshake' || $c['state'] === 'open') && $clock - $c['last'] > 75) {
+            wsClose($c, 'silence');
+        } elseif ($c['state'] === 'open' && $c['down'] && $clock - $c['openedAt'] >= WS_STABLE) {
+            $c['down'] = false;
+            wlLog('info', 'Connexion directe à ' . $c['name'] . ' rétablie');
+        }
+    }
+    unset($c);
 }
 
 function wsConnected() {
@@ -446,18 +534,21 @@ function wsConnected() {
 
 /* Transmet au plugin les états reçus, au plus deux fois par seconde : un
  * curseur qu'on fait glisser dans l'appli WLED pousse des dizaines d'états,
- * seul le dernier compte. */
+ * seul le dernier compte. En cas d'échec, ils sont gardés — sauf si un plus
+ * récent est arrivé entre-temps — et les essais s'espacent. */
 function wsFlush() {
-    global $pushes, $pushedAt;
-    if (empty($pushes) || wlClock() - $pushedAt < 0.5) {
+    global $pushes, $pushedAt, $pushRetryAt, $pushFailures;
+    $clock = wlClock();
+    if (empty($pushes) || $clock - $pushedAt < 0.5 || $clock < $pushRetryAt) {
         return;
     }
+    $sending = $pushes;
+    $pushes = array();
+    $pushedAt = $clock;
     $parts = array();
-    foreach ($pushes as $eq => $message) {
+    foreach ($sending as $eq => $message) {
         $parts[] = '"' . (int) $eq . '":' . $message;
     }
-    $pushes = array();
-    $pushedAt = wlClock();
     $ch = wlHandle('action=push');
     curl_setopt_array($ch, array(
         CURLOPT_POST       => true,
@@ -465,12 +556,17 @@ function wsFlush() {
         CURLOPT_HTTPHEADER => array('Content-Type: application/json'),
         CURLOPT_TIMEOUT    => 30,
     ));
-    curl_exec($ch);
-    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    wlRefused($code);
-    if ($code !== 200) {
-        wlLog('debug', 'Transmission des états en échec (HTTP ' . $code . ')');
+    $r = wlRun(array($ch))[0];
+    wlRefused($r['code']);
+    if ($r['code'] === 200) {
+        $pushFailures = 0;
+        return;
+    }
+    $pushes = $pushes + $sending;
+    $pushFailures++;
+    $pushRetryAt = wlClock() + min(30, 2 * (1 << min(4, $pushFailures - 1)));
+    if ($pushFailures === 1) {
+        wlLog('warning', 'Transmission des états à Jeedom en échec (HTTP ' . $r['code'] . '), nouvel essai en s\'espaçant');
     }
 }
 
