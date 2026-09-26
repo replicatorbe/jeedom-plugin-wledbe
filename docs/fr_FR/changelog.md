@@ -1,5 +1,13 @@
 # Changelog — plugin WLED
 
+## 0.3.3 (beta)
+
+- Découverte : les WLED cochés dans la fenêtre « WLED trouvés » sont de
+  nouveau créés. La fenêtre de Jeedom 4.4 est retirée avant la validation,
+  les cases n'étaient plus lisibles et rien n'était créé, sans message. Les
+  choix sont désormais retenus à chaque clic ; valider sans rien cocher
+  affiche un avertissement.
+
 ## 0.3.2 (beta)
 
 - Scène « Police » : effet « Two Dots » (l'ancien effet Police de WLED),

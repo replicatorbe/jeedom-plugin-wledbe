@@ -154,8 +154,12 @@ function wledbeShowFound(_result) {
   if (_result.mdns === false) {
     html += '<p class="text-muted"><small>{{Le mDNS n\'est pas disponible sur cette machine (avahi absent ou arrêté) : seul le balayage HTTP a été utilisé.}}</small></p>'
   }
+  /* Les choix sont retenus à chaque clic : jeeDialog retire la fenêtre du
+     document avant d'appeler le rappel, les cases n'y sont plus lisibles. */
+  window.wledbeChosen = {}
   for (var i = 0; i < devices.length; i++) {
     var d = devices[i]
+    window.wledbeChosen[i] = !(d.known && d.known_ip === d.ip)
     html += '<div class="checkbox"><label>'
     html += '<input type="checkbox" class="wledbeFound" data-index="' + i + '"' + (d.known && d.known_ip === d.ip ? '' : ' checked') + '> '
     html += '<b>' + wledbeEscape(d.name || d.mac) + '</b>'
@@ -170,10 +174,13 @@ function wledbeShowFound(_result) {
   }
   wledbeConfirm('{{WLED trouvés}}', html, function () {
     var chosen = []
-    document.querySelectorAll('.wledbeFound').forEach(function (_box) {
-      if (_box.checked) { chosen.push({ ip: devices[parseInt(_box.getAttribute('data-index'), 10)].ip }) }
-    })
-    if (chosen.length === 0) { return }
+    for (var index in window.wledbeChosen) {
+      if (window.wledbeChosen[index]) { chosen.push({ ip: devices[parseInt(index, 10)].ip }) }
+    }
+    if (chosen.length === 0) {
+      jeedomUtils.showAlert({ message: '{{Aucun WLED coché : rien n\'a été créé.}}', level: 'warning' })
+      return
+    }
     /* Chaque appareil est interrogé, créé et relevé : quelques secondes. */
     domUtils.showLoading()
     wledbeAjax('create', { devices: JSON.stringify(chosen) }, function (result) {
@@ -749,6 +756,11 @@ window.wledbeHandlers = {
   change: function (_event) {
     if (_event.target && _event.target.classList && _event.target.classList.contains('wledbeMember')) {
       wledbeMembersToInput()
+    }
+    /* Voir wledbeShowFound : les cases de la découverte ne sont plus dans le
+       document quand le rappel de la fenêtre s'exécute. */
+    if (_event.target && _event.target.classList && _event.target.classList.contains('wledbeFound') && window.wledbeChosen) {
+      window.wledbeChosen[_event.target.getAttribute('data-index')] = _event.target.checked
     }
   },
   /* Toute saisie dans l'éditeur de scènes le marque comme modifié. */
