@@ -108,6 +108,12 @@ class wledbe extends eqLogic {
             if ((int) $eqLogic->getCache('failures', 0) >= self::OFFLINE_AFTER && !$slowTurn) {
                 continue;
             }
+            /* Un appareil suivi en direct pousse déjà son état : il n'est
+             * relu qu'une minute sur cinq, pour le signal Wi-Fi, qu'il ne
+             * pousse pas quand rien ne change, et une nouvelle version. */
+            if (!$slowTurn && $eqLogic->isLive()) {
+                continue;
+            }
             $due[$eqLogic->getId()] = $eqLogic;
             $urls[$eqLogic->getId()] = 'http://' . $eqLogic->getConfiguration('ip') . '/json/si';
         }
@@ -128,9 +134,11 @@ class wledbe extends eqLogic {
     }
 
     /*
-     * Une fois par heure : relecture des listes (un preset ajouté dans
-     * l'interface de WLED ne change pas la version), puis mDNS pour retrouver
-     * un appareil qui a changé d'adresse et signaler les nouveaux.
+     * Une fois par heure : relecture des presets, puis mDNS pour retrouver un
+     * appareil qui a changé d'adresse et signaler les nouveaux. Effets et
+     * palettes ne changent qu'avec la version, que le relevé de la minute
+     * surveille (ingest()) ; un preset ajouté dans l'interface de WLED, lui,
+     * ne change rien que ce relevé verrait.
      */
     public static function cronHourly() {
         $lost = false;
@@ -143,7 +151,7 @@ class wledbe extends eqLogic {
                 continue;
             }
             try {
-                $eqLogic->refreshLists();
+                $eqLogic->refreshPresets();
             } catch (Throwable $e) {
                 log::add(__CLASS__, 'debug', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
             }
@@ -155,6 +163,58 @@ class wledbe extends eqLogic {
                 log::add(__CLASS__, 'debug', __('Découverte automatique :', __FILE__) . ' ' . $e->getMessage());
             }
         }
+    }
+
+    /*
+     * Lignes du plugin dans la page Santé de Jeedom. L'état du démon y est
+     * déjà : on n'y ajoute que ce qui se lit dans le cache, sans interroger
+     * aucun appareil. La page affiche ces textes tels quels.
+     */
+    public static function health() {
+        $devices = array();
+        foreach (self::byType(__CLASS__, true) as $eqLogic) {
+            if ($eqLogic->isConfigured()) {
+                $devices[] = $eqLogic;
+            }
+        }
+        $names = function ($_list) {
+            return htmlspecialchars(implode(', ', array_map(function ($eq) { return $eq->getHumanName(); }, $_list)), ENT_QUOTES);
+        };
+        $offline = array_filter($devices, function ($eq) { return (int) $eq->getCache('failures', 0) >= self::OFFLINE_AFTER; });
+        $failed = array_filter($devices, function ($eq) { return (int) $eq->getCache('verify_failed', 0) === 1; });
+        $pending = array_filter($devices, function ($eq) { return is_array($eq->sceneGet('pending_restore', null)); });
+        $return = array(
+            array(
+                'test'   => __('WLED joignables', __FILE__),
+                'result' => (count($devices) - count($offline)) . '/' . count($devices) . (empty($offline) ? '' : ' — ' . $names($offline)),
+                'advice' => empty($offline) ? '' : __('Vérifiez l\'alimentation et le Wi-Fi de ces appareils ; la découverte horaire retrouve une adresse IP changée.', __FILE__),
+                'state'  => empty($offline),
+            ),
+            array(
+                'test'   => __('Dernier ordre appliqué', __FILE__),
+                'result' => empty($failed) ? __('OK', __FILE__) : $names($failed),
+                'advice' => empty($failed) ? '' : __('Le dernier ordre envoyé à ces appareils n\'a pas été appliqué : voir leur commande « Dernière vérification ».', __FILE__),
+                'state'  => empty($failed),
+            ),
+        );
+        if (config::byKey('live', __CLASS__, 1) == 1) {
+            $live = array_filter($devices, function ($eq) { return $eq->isLive(); });
+            $return[] = array(
+                'test'   => __('Connexions directes (WebSocket)', __FILE__),
+                'result' => count($live) . '/' . count($devices),
+                'advice' => count($live) === count($devices) ? '' : __('Un appareil hors connexion directe est relu chaque minute. L\'information peut avoir une minute de retard après le démarrage du démon.', __FILE__),
+                'state'  => count($live) === count($devices) - count($offline),
+            );
+        }
+        if (!empty($pending)) {
+            $return[] = array(
+                'test'   => __('Éclairage à restaurer', __FILE__),
+                'result' => $names($pending),
+                'advice' => __('Une scène est finie mais l\'appareil ne répondait pas : la restauration est retentée toutes les 30 secondes, pendant 30 minutes.', __FILE__),
+                'state'  => false,
+            );
+        }
+        return $return;
     }
 
     /* =============================================================== DÉMON */
@@ -956,6 +1016,14 @@ class wledbe extends eqLogic {
         return array('effects' => count($effects), 'palettes' => count($palettes), 'presets' => count(self::presetList($presets)));
     }
 
+    /* Les presets seuls : une requête au lieu de quatre. */
+    public function refreshPresets() {
+        $presets = self::presetList($this->call('GET', '/presets.json'));
+        $this->setCache('preset_names', $presets);
+        $this->updateList('preset_set', $presets);
+        return count($presets);
+    }
+
     private function updateList($_logicalId, $_list) {
         $cmd = $this->getCmd('action', $_logicalId);
         if (!is_object($cmd)) {
@@ -1094,6 +1162,18 @@ class wledbe extends eqLogic {
         }
         if (isset($_info['wifi']['signal'])) {
             $values['wifi_signal'] = (int) $_info['wifi']['signal'];
+        }
+        /* Estimation de WLED d'après les couleurs affichées, sans mesure :
+         * 0 quand le limiteur de courant est désactivé. */
+        if (isset($_info['leds']['pwr'])) {
+            $values['power'] = (int) $_info['leds']['pwr'];
+        }
+        /* Une valeur qui baisse : l'appareil a redémarré. */
+        if (isset($_info['uptime'])) {
+            $values['uptime'] = (int) $_info['uptime'];
+        }
+        if (isset($_info['ver'])) {
+            $values['version'] = self::deviceText($_info['ver'], 32);
         }
         return $values;
     }
@@ -2870,6 +2950,9 @@ class wledbe extends eqLogic {
         $this->addCmdIfMissing('wifi_signal', 'Signal Wi-Fi', 'info', 'numeric', array('order' => 13, 'unite' => '%', 'min' => 0, 'max' => 100));
         $this->addCmdIfMissing('verify_ok', 'Vérification', 'info', 'binary', array('order' => 14));
         $this->addCmdIfMissing('verify_detail', 'Dernière vérification', 'info', 'string', array('order' => 15));
+        $this->addCmdIfMissing('power', 'Consommation estimée', 'info', 'numeric', array('order' => 16, 'unite' => 'mA', 'min' => 0));
+        $this->addCmdIfMissing('uptime', 'Durée de fonctionnement', 'info', 'numeric', array('order' => 17, 'unite' => 's', 'min' => 0));
+        $this->addCmdIfMissing('version', 'Version WLED', 'info', 'string', array('order' => 18));
 
         $this->addCmdIfMissing('on_set', 'Allumer', 'action', 'other', array('order' => 100, 'isVisible' => 1, 'generic' => 'LIGHT_ON', 'value' => $on));
         $this->addCmdIfMissing('off_set', 'Éteindre', 'action', 'other', array('order' => 101, 'isVisible' => 1, 'generic' => 'LIGHT_OFF', 'value' => $on));

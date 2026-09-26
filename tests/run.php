@@ -137,6 +137,14 @@ check('effet par son nom', $values['effect'], 'Solid');
 check('palette par son nom', $values['palette'], 'Default');
 check('signal Wi-Fi', $values['wifi_signal'], 22);
 check('pas de preset actif', $values['preset'], -1);
+check('consommation estimée', $values['power'], 320);
+check('durée de fonctionnement', $values['uptime'], 510288);
+check('version', $values['version'], '16.0.0');
+check('état seul (réponse d\'un ordre) : ni version ni consommation',
+    array_intersect_key(wledbe::stateValues($si['state'], array(), $eff, $pal), array('power' => 1, 'uptime' => 1, 'version' => 1)), array());
+$health = wledbe::health();
+check('page Santé : lignes complètes', count(array_filter($health, function ($l) {
+    return isset($l['test'], $l['result'], $l['advice'], $l['state']); })) === count($health) && count($health) >= 2, true);
 check('effet inconnu : numéro affiché', wledbe::stateValues(array('seg' => array(array('id' => 0, 'fx' => 999))), array(), $eff, $pal)['effect'], '#999');
 check('RGBW en blanc pur', wledbe::colorToHex(array(0, 0, 0, 255)), '#ffffff');
 check('#f00 → rouge', wledbe::hexToColor('#f00'), array(255, 0, 0));

@@ -62,6 +62,9 @@ L'onglet **Diagnostic** montre la dernière réponse brute de l'appareil.
 | Signal Wi-Fi | info, % | qualité du Wi-Fi vue par WLED |
 | Vérification | info binaire | 1 si le dernier ordre a été appliqué, 0 sinon |
 | Dernière vérification | info | heure et détail du dernier contrôle |
+| Consommation estimée | info, mA | courant estimé par WLED d'après les couleurs affichées, sans mesure ; 0 si le limiteur de courant est désactivé dans WLED |
+| Durée de fonctionnement | info, s | temps depuis le dernier démarrage : une valeur qui baisse signale un redémarrage |
+| Version WLED | info | version du micrologiciel, qui change après une mise à jour |
 | Allumer, Éteindre, Basculer | action | |
 | Régler la luminosité | action, curseur 0-100 | 0 éteint |
 | Régler la couleur | action, couleur | allume et change la couleur principale |
@@ -324,7 +327,8 @@ une scène moins prioritaire, et une alarme la recouvre.
 Le démon garde une **connexion directe** (WebSocket) avec chaque WLED. WLED y
 signale tout changement dès qu'il a lieu : bouton de l'appareil, appli WLED,
 autre système. Les commandes info de Jeedom suivent en une à deux secondes,
-au lieu d'attendre le relevé de la minute. Une scène **sous garde** défaite
+au lieu d'attendre le relevé de la minute, et l'appareil n'est plus relu que
+toutes les cinq minutes. Une scène **sous garde** défaite
 est réimposée aussitôt, sans attendre son tour de garde.
 
 L'onglet Diagnostic dit si l'appareil est connecté en direct (l'information
@@ -352,9 +356,23 @@ en boucle, décochez **État instantané** dans la configuration du plugin.
 ## Relevé de l'état
 
 L'état de chaque WLED est poussé en direct par l'appareil (voir « État
-instantané »), relu immédiatement après chaque ordre, et de toute façon relu
-**une fois par minute**, tous les appareils en parallèle. Un appareil injoignable n'est plus relu que toutes les cinq
-minutes, pour ne pas retarder les autres.
+instantané ») et relu immédiatement après chaque ordre. Un appareil sans
+connexion directe est en plus relu **une fois par minute**, tous les appareils
+en parallèle ; un appareil en connexion directe, qui signale déjà chaque
+changement, seulement toutes les cinq minutes (signal Wi-Fi, version). Un
+appareil injoignable n'est plus relu que toutes les cinq minutes, pour ne pas
+retarder les autres.
+
+Les presets sont relus une fois par heure : un preset ajouté dans l'interface
+de WLED apparaît dans la liste « Appliquer un preset » dans l'heure, ou tout
+de suite avec le bouton « Relire effets, palettes et presets » de la page de
+l'équipement.
+
+## Page Santé
+
+La page **Santé** de Jeedom affiche, pour le plugin, les WLED joignables, ceux
+dont le dernier ordre n'a pas été appliqué, les connexions directes ouvertes
+et les restaurations d'éclairage en attente.
 
 ## Dépannage
 

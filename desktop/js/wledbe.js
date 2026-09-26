@@ -425,7 +425,7 @@ function wledbeRecipeHtml(_kind, _recipe) {
   html += f('{{Intensité}}', '<input type="number" min="0" max="255" class="form-control input-sm"' + attr + ' data-field="intensity" value="' + wledbeAttr(r.intensity) + '">')
   if (_kind === 'matrix') {
     html += f('{{Texte défilant}}', '<input class="form-control input-sm"' + attr + ' data-field="text" maxlength="32" placeholder="{{avec l\'effet Scrolling Text}}" value="' + wledbeAttr(r.text) + '">'
-      + '<span class="help-block" style="margin:2px 0 0 0;"><small>{{32 caractères au plus, moins avec des accents : c\'est la limite de WLED.}}</small></span>')
+      + '<span class="help-block" style="margin:2px 0 0 0;"><small>{{32 caractères au plus, la limite de WLED. Les accents sont retirés : WLED ne les affiche pas.}}</small></span>')
   }
   html += f('{{JSON avancé}}', '<input class="form-control input-sm"' + attr + ' data-field="json" placeholder=\'{"seg":{"c1":200}}\' value="' + wledbeAttr(r.json) + '">')
   return html

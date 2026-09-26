@@ -1,5 +1,20 @@
 # Changelog — plugin WLED
 
+## 0.3.4 (beta)
+
+- Relevé : un WLED en connexion directe (État instantané) n'est plus relu
+  chaque minute, mais toutes les cinq minutes ; il signale déjà lui-même
+  chaque changement. Moins de requêtes pour les ESP8266.
+- Relecture horaire : seuls les presets sont relus (une requête au lieu de
+  quatre par appareil) ; effets et palettes le sont toujours à chaque
+  changement de version.
+- Page Santé de Jeedom : WLED joignables, derniers ordres non appliqués,
+  connexions directes, restaurations en attente.
+- Nouvelles commandes info : Consommation estimée (mA), Durée de
+  fonctionnement (détecte un redémarrage), Version WLED.
+- Éditeur de scènes : l'aide du texte défilant ne parle plus des accents
+  comme d'une limite, ils sont retirés depuis la 0.3.1.
+
 ## 0.3.3 (beta)
 
 - Découverte : les WLED cochés dans la fenêtre « WLED trouvés » sont de
