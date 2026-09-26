@@ -620,6 +620,16 @@ check('/16 refusé, pas tronqué en silence', strpos($err, '/24') !== false, tru
 $err = '';
 try { wledbe::subnetPrefix('300.1.1'); } catch (Exception $e) { $err = $e->getMessage(); }
 check('octet > 255 refusé', $err !== '', true);
+/* Le bilan de recherche : la page lit « devices » et « mdns » depuis
+ * toujours, et affiche le reste quand rien n'a répondu. */
+$report = wledbe::discoverReport(array('b' => array('ip' => '192.168.1.9')), array(array('ip' => '192.168.1.9'), array('ip' => '192.168.1.8')),
+    array('192.168.1', '10.0.5'), 509, 7.345);
+check('bilan : appareils en liste', $report['devices'], array(array('ip' => '192.168.1.9')));
+check('bilan : mDNS disponible', $report['mdns'], true);
+check('bilan : sous-réseaux parcourus', $report['subnets'], array('192.168.1.0/24', '10.0.5.0/24'));
+check('bilan : adresses, réponses mDNS, durée', array($report['scanned'], $report['announced'], $report['seconds']), array(509, 2, 7.3));
+$report = wledbe::discoverReport(array(), null, array('192.168.1'), 254, 3);
+check('bilan sans avahi : mDNS indisponible, aucune réponse', array($report['mdns'], $report['announced'], $report['devices']), array(false, 0, array()));
 $sceneCmd = new wledbeCmd();
 $sceneCmd->logicalId = 'scene::police';
 check('commande de scène protégée de la sauvegarde de page', $sceneCmd->dontRemoveCmd(), true);

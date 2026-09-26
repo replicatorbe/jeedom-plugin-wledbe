@@ -46,7 +46,7 @@ try {
         $device['known'] = is_object($existing) ? $existing->getHumanName() : '';
         $device['known_ip'] = is_object($existing) ? (string) $existing->getConfiguration('ip') : '';
         $device['source'] = 'IP';
-        ajax::success(array('devices' => array($device), 'mdns' => true));
+        ajax::success(array('devices' => array($device), 'mdns' => true, 'probe' => $device['ip']));
     }
 
     /* Crée les appareils retenus, ou met leur adresse à jour. */

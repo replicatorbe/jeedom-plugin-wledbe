@@ -1,5 +1,16 @@
 # Changelog — plugin WLED
 
+## 0.4.3 (beta)
+
+- Découverte : « Rechercher des WLED » lance la recherche dès le clic, sur
+  le réseau de Jeedom. Elle ouvrait d'abord une fenêtre qui invitait à
+  laisser le champ vide, mais Jeedom traite un champ vide comme Annuler :
+  la recherche ne partait pas, sans rien afficher. Elle se déroule
+  désormais dans un panneau de la page, avec un compteur, puis un bilan
+  (sous-réseaux parcourus, adresses interrogées, réponses mDNS, durée). Les
+  WLED trouvés s'y cochent et se créent ; si rien ne répond, le panneau dit
+  quoi vérifier et propose un autre sous-réseau ou une adresse IP.
+
 ## 0.4.2 (beta)
 
 - Texte sur matrice : option `sens=inverse`, le texte défile de gauche à

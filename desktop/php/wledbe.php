@@ -38,6 +38,22 @@ $eqLogics = eqLogic::byType($plugin->getId());
 			</div>
 		</div>
 
+		<!-- Recherche : panneau rempli par le JS, caché jusqu'au clic sur
+		     « Rechercher des WLED » ou « Ajouter par adresse IP ». -->
+		<div id="div_wledbeSearch" style="display:none;margin:5px;">
+			<legend><i class="fas fa-search"></i> {{Recherche}}</legend>
+			<div id="div_wledbeSearchStatus" class="alert alert-info"></div>
+			<div id="div_wledbeSearchResults"></div>
+			<div class="form-inline" style="margin-top:10px;">
+				<a class="btn btn-success btn-sm" id="bt_wledbeCreateChecked" style="display:none;"><i class="fas fa-check-circle"></i> {{Créer les WLED cochés}}</a>
+				<span style="margin-left:15px;">{{Chercher sur un autre sous-réseau :}}</span>
+				<input type="text" class="form-control input-sm" id="in_wledbeSubnet" placeholder="192.168.1.0/24" style="width:160px;">
+				<a class="btn btn-default btn-sm" id="bt_wledbeSearchSubnet"><i class="fas fa-search"></i> {{Chercher}}</a>
+				<a class="btn btn-default btn-sm" id="bt_wledbeSearchIp"><i class="fas fa-plus-circle"></i> {{Ajouter par adresse IP}}</a>
+				<a class="btn btn-default btn-sm" id="bt_wledbeSearchClose"><i class="fas fa-times"></i> {{Fermer}}</a>
+			</div>
+		</div>
+
 		<!-- Bibliothèque de scènes : remplie par le JS, cachée jusqu'au clic sur
 		     « Scènes ». Rien ici n'est un eqLogicAttr : elle s'enregistre à part. -->
 		<div id="div_wledbeScenes" style="display:none;">

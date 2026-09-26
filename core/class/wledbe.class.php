@@ -861,8 +861,11 @@ class wledbe extends eqLogic {
      *     laissent passer ;
      *   - un balayage HTTP de /json/info sur tout le sous-réseau, en parallèle,
      *     qui passe partout où une requête HTTP passe.
+     * Rend les appareils trouvés et un bilan de ce qui a été interrogé, que la
+     * page affiche : sans lui, « aucun WLED » ne dit pas où l'on a cherché.
      */
     public static function discover($_subnet = '') {
+        $started = microtime(true);
         $prefixes = array();
         $subnet = trim((string) $_subnet);
         if ($subnet !== '') {
@@ -923,7 +926,21 @@ class wledbe extends eqLogic {
             }
         }
         usort($found, function ($a, $b) { return strnatcasecmp($a['name'], $b['name']); });
-        return array('devices' => array_values($found), 'mdns' => $mdns !== null);
+        return self::discoverReport($found, $mdns, $prefixes, count($sources), microtime(true) - $started);
+    }
+
+    /* Le résultat d'une recherche : « devices » et « mdns » (false si avahi
+     * manque), que la page lisait déjà, puis le bilan : sous-réseaux parcourus,
+     * adresses interrogées, réponses mDNS, durée en secondes. */
+    public static function discoverReport($_found, $_mdns, $_prefixes, $_scanned, $_seconds) {
+        return array(
+            'devices'   => array_values($_found),
+            'mdns'      => $_mdns !== null,
+            'subnets'   => array_map(function ($p) { return $p . '.0/24'; }, array_values($_prefixes)),
+            'scanned'   => (int) $_scanned,
+            'announced' => is_array($_mdns) ? count($_mdns) : 0,
+            'seconds'   => round($_seconds, 1),
+        );
     }
 
     /*

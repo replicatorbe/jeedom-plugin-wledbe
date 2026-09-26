@@ -114,88 +114,169 @@ function wledbeText(_id, _text) {
 
 /* ============================================================== DÉCOUVERTE */
 
-function wledbeDiscover() {
-  var last = ''
-  try { last = window.localStorage.getItem('wledbe:subnet') || '' } catch (e) { last = '' }
+/*
+ * La recherche part dès le clic, sur le réseau de Jeedom, et se déroule dans
+ * un panneau de la page : un compteur montre qu'elle tourne, puis un bilan
+ * dit ce qui a été interrogé. Pas de fenêtre de saisie au départ : celle du
+ * coeur rend « null » pour un champ vide comme pour Annuler, et une
+ * recherche lancée champ vide ne partait jamais.
+ */
+window.wledbeSearching = false
 
-  wledbePrompt('{{Sous-réseau à parcourir, en /24. Laisser vide pour celui de Jeedom.}}', last, '192.168.0.0/24', function (_subnet) {
-    var subnet = String(_subnet).trim()
-    try { window.localStorage.setItem('wledbe:subnet', subnet) } catch (e) { /* mode privé */ }
-    /* La recherche dure une dizaine de secondes : un voile d'attente plutôt
-       qu'un message qui disparaîtrait avant la fin. */
-    domUtils.showLoading()
-    wledbeAjax('discover', { subnet: subnet }, function (result) {
-      domUtils.hideLoading()
-      wledbeShowFound(result.result)
-    }, function (error) {
-      domUtils.hideLoading()
-      jeedomUtils.showAlert({ message: wledbeEscape((error && error.result) ? error.result : '{{Échec de la recherche}}'), level: 'danger' })
-    })
+function wledbeSearchPanel(_level, _html) {
+  var panel = wledbeEl('div_wledbeSearch')
+  var status = wledbeEl('div_wledbeSearchStatus')
+  if (panel === null || status === null) { return }
+  panel.style.display = ''
+  status.className = 'alert alert-' + _level
+  status.innerHTML = _html
+}
+
+/* Message d'une erreur ajax : réponse du plugin, ou échec de la requête. */
+function wledbeErrorText(_error, _default) {
+  if (_error && _error.result) { return _error.result }
+  if (_error && _error.statusText) { return _error.statusText }
+  return _default
+}
+
+function wledbeSearch(_subnet) {
+  if (window.wledbeSearching) { return }
+  var subnet = String(_subnet || '').trim()
+  var where = subnet !== '' ? wledbeEscape(subnet) : '{{le réseau de Jeedom}}'
+  var results = wledbeEl('div_wledbeSearchResults')
+  if (results !== null) { results.innerHTML = '' }
+  var create = wledbeEl('bt_wledbeCreateChecked')
+  if (create !== null) { create.style.display = 'none' }
+  /* Le dernier sous-réseau saisi reste proposé dans le champ. */
+  var input = wledbeEl('in_wledbeSubnet')
+  if (input !== null && input.value === '') {
+    try { input.value = window.localStorage.getItem('wledbe:subnet') || '' } catch (e) { /* mode privé */ }
+  }
+  window.wledbeSearching = true
+  var started = Date.now()
+  var render = function () {
+    var seconds = Math.floor((Date.now() - started) / 1000)
+    wledbeSearchPanel('info', '<i class="fas fa-spinner fa-spin"></i> {{Recherche en cours sur}} ' + where + ' — '
+      + seconds + ' s<br><small>{{Annonces mDNS, puis interrogation de chaque adresse du sous-réseau. Comptez une dizaine de secondes.}}</small>')
+  }
+  render()
+  var timer = setInterval(render, 500)
+  wledbeAjax('discover', { subnet: subnet }, function (result) {
+    clearInterval(timer)
+    window.wledbeSearching = false
+    wledbeShowFound(result.result)
+  }, function (error) {
+    clearInterval(timer)
+    window.wledbeSearching = false
+    wledbeSearchPanel('danger', '<i class="fas fa-times-circle"></i> {{La recherche a échoué :}} '
+      + wledbeEscape(wledbeErrorText(error, '{{erreur inconnue}}')))
   })
 }
 
+function wledbeDiscover() {
+  wledbeSearch('')
+}
+
+function wledbeSearchSubnet() {
+  var subnet = wledbeEl('in_wledbeSubnet').value.trim()
+  if (subnet === '') {
+    jeedomUtils.showAlert({ message: '{{Saisissez un sous-réseau, par exemple 192.168.1.0/24.}}', level: 'warning' })
+    return
+  }
+  try { window.localStorage.setItem('wledbe:subnet', subnet) } catch (e) { /* mode privé */ }
+  wledbeSearch(subnet)
+}
+
+function wledbeSearchClose() {
+  wledbeEl('div_wledbeSearch').style.display = 'none'
+}
+
+/* Ici, un champ vide vaut bien Annuler : rien n'est interrogé. */
 function wledbeAddIp() {
+  if (window.wledbeSearching) { return }
   wledbePrompt('{{Adresse IP du WLED}}', '', '192.168.0.150', function (_ip) {
     var ip = String(_ip).trim()
     if (ip === '') { return }
+    wledbeEl('div_wledbeSearchResults').innerHTML = ''
+    wledbeEl('bt_wledbeCreateChecked').style.display = 'none'
+    wledbeSearchPanel('info', '<i class="fas fa-spinner fa-spin"></i> {{Interrogation de}} ' + wledbeEscape(ip) + '…')
     wledbeAjax('probe', { ip: ip }, function (result) {
       wledbeShowFound(result.result)
+    }, function (error) {
+      wledbeSearchPanel('warning', '<i class="fas fa-exclamation-triangle"></i> ' + wledbeEscape(wledbeErrorText(error, '{{Aucune réponse.}}')))
     })
   })
 }
 
 function wledbeShowFound(_result) {
-  var devices = (isset(_result) && isset(_result.devices)) ? _result.devices : []
+  var devices = (_result && _result.devices) ? _result.devices : []
+  var results = wledbeEl('div_wledbeSearchResults')
+  var create = wledbeEl('bt_wledbeCreateChecked')
+  window.wledbeFoundDevices = devices
+  var summary = ''
+  if (_result && _result.probe) {
+    summary = '{{Adresse interrogée :}} ' + wledbeEscape(_result.probe)
+  } else if (_result) {
+    summary = wledbeEscape((_result.subnets || []).join(', ')) + ' — ' + wledbeEscape(_result.scanned) + ' {{adresses interrogées}}, '
+      + (_result.mdns === false ? '{{mDNS indisponible (avahi absent ou arrêté)}}' : wledbeEscape(_result.announced) + ' {{réponse(s) mDNS}}')
+      + ', ' + wledbeEscape(_result.seconds) + ' s'
+  }
   if (devices.length === 0) {
-    jeedomUtils.showAlert({ message: '{{Aucun WLED n\'a répondu. Vérifiez qu\'il est allumé et sur le même réseau, ou saisissez le sous-réseau où il se trouve.}}', level: 'warning' })
+    wledbeSearchPanel('warning', '<i class="fas fa-exclamation-triangle"></i> <b>{{Aucun WLED n\'a répondu.}}</b><br>'
+      + '<small>' + summary + '</small><br>'
+      + '{{Vérifiez que le WLED est allumé, connecté au Wi-Fi et sur le même réseau que Jeedom (son adresse s\'ouvre-t-elle dans un navigateur ?). S\'il est sur un autre sous-réseau (VLAN, Wi-Fi invité), saisissez-le ci-dessous, ou ajoutez-le par son adresse IP.}}')
+    create.style.display = 'none'
     return
   }
-  var html = '<p>{{Cochez les appareils à créer. Ceux qui existent déjà verront seulement leur adresse mise à jour.}}</p>'
-  if (_result.mdns === false) {
-    html += '<p class="text-muted"><small>{{Le mDNS n\'est pas disponible sur cette machine (avahi absent ou arrêté) : seul le balayage HTTP a été utilisé.}}</small></p>'
-  }
-  /* Les choix sont retenus à chaque clic : jeeDialog retire la fenêtre du
-     document avant d'appeler le rappel, les cases n'y sont plus lisibles. */
-  window.wledbeChosen = {}
+  var fresh = devices.filter(function (d) { return !(d.known && d.known_ip === d.ip) }).length
+  wledbeSearchPanel('success', '<i class="fas fa-check-circle"></i> <b>' + devices.length + ' {{WLED trouvé(s)}}</b>'
+    + (fresh === 0 ? ' — {{tous déjà créés}}' : ' — {{cochez ceux à créer ; ceux qui existent déjà verront seulement leur adresse mise à jour}}')
+    + '<br><small>' + summary + '</small>')
+  var html = ''
   for (var i = 0; i < devices.length; i++) {
     var d = devices[i]
-    window.wledbeChosen[i] = !(d.known && d.known_ip === d.ip)
+    var already = d.known && d.known_ip === d.ip
     html += '<div class="checkbox"><label>'
-    html += '<input type="checkbox" class="wledbeFound" data-index="' + i + '"' + (d.known && d.known_ip === d.ip ? '' : ' checked') + '> '
+    html += '<input type="checkbox" class="wledbeFound" data-index="' + i + '"' + (already ? ' disabled' : ' checked') + '> '
     html += '<b>' + wledbeEscape(d.name || d.mac) + '</b>'
     html += ' — ' + wledbeEscape(d.ip)
     html += ' <span class="label label-info">' + (d.layout === 'matrix' ? '{{matrice}} ' + wledbeEscape(d.matrix_w) + '×' + wledbeEscape(d.matrix_h) : '{{bande}}') + '</span>'
     html += ' <small>' + wledbeEscape(d.leds) + ' {{LED}} · WLED ' + wledbeEscape(d.version) + ' · ' + wledbeEscape(d.source) + '</small>'
     if (d.known) {
       html += ' <span class="label label-default">{{déjà créé :}} ' + wledbeEscape(d.known) + '</span>'
-      if (d.known_ip !== d.ip) { html += ' <span class="label label-warning">{{nouvelle adresse}}</span>' }
+      if (d.known_ip !== d.ip) { html += ' <span class="label label-warning">{{nouvelle adresse, sera mise à jour}}</span>' }
     }
     html += '</label></div>'
   }
-  wledbeConfirm('{{WLED trouvés}}', html, function () {
-    var chosen = []
-    for (var index in window.wledbeChosen) {
-      if (window.wledbeChosen[index]) { chosen.push({ ip: devices[parseInt(index, 10)].ip }) }
+  results.innerHTML = html
+  create.style.display = fresh > 0 ? '' : 'none'
+}
+
+function wledbeCreateChecked() {
+  var chosen = []
+  document.querySelectorAll('#div_wledbeSearchResults .wledbeFound').forEach(function (_box) {
+    if (_box.checked && !_box.disabled) {
+      chosen.push({ ip: window.wledbeFoundDevices[parseInt(_box.getAttribute('data-index'), 10)].ip })
     }
-    if (chosen.length === 0) {
-      jeedomUtils.showAlert({ message: '{{Aucun WLED coché : rien n\'a été créé.}}', level: 'warning' })
+  })
+  if (chosen.length === 0) {
+    jeedomUtils.showAlert({ message: '{{Aucun WLED coché : rien n\'a été créé.}}', level: 'warning' })
+    return
+  }
+  /* Chaque appareil est interrogé, créé et relevé : quelques secondes. */
+  wledbeEl('bt_wledbeCreateChecked').style.display = 'none'
+  wledbeSearchPanel('info', '<i class="fas fa-spinner fa-spin"></i> {{Création de}} ' + chosen.length + ' {{WLED : lecture de leurs effets, palettes et presets…}}')
+  wledbeAjax('create', { devices: JSON.stringify(chosen) }, function (result) {
+    var r = result.result
+    if (r.errors && r.errors.length > 0) {
+      var list = r.errors.map(function (_e) { return '<li>' + wledbeEscape(_e) + '</li>' }).join('')
+      wledbeAlert('{{Création incomplète}}', '<p>' + r.created + ' {{appareil(s) créé(s). Échecs :}}</p><ul>' + list + '</ul>', function () { wledbeReload() })
       return
     }
-    /* Chaque appareil est interrogé, créé et relevé : quelques secondes. */
-    domUtils.showLoading()
-    wledbeAjax('create', { devices: JSON.stringify(chosen) }, function (result) {
-      domUtils.hideLoading()
-      var r = result.result
-      if (r.errors && r.errors.length > 0) {
-        var list = r.errors.map(function (_e) { return '<li>' + wledbeEscape(_e) + '</li>' }).join('')
-        wledbeAlert('{{Création incomplète}}', '<p>' + r.created + ' {{appareil(s) créé(s). Échecs :}}</p><ul>' + list + '</ul>', function () { wledbeReload() })
-        return
-      }
-      wledbeReload()
-    }, function (error) {
-      domUtils.hideLoading()
-      jeedomUtils.showAlert({ message: wledbeEscape((error && error.result) ? error.result : '{{Échec de la création}}'), level: 'danger' })
-    })
+    wledbeReload()
+  }, function (error) {
+    wledbeSearchPanel('danger', '<i class="fas fa-times-circle"></i> {{Échec de la création :}} ' + wledbeEscape(wledbeErrorText(error, '{{erreur inconnue}}')))
+    wledbeEl('bt_wledbeCreateChecked').style.display = ''
   })
 }
 
@@ -794,6 +875,10 @@ window.wledbeHandlers = {
     var actions = {
       bt_wledbeDiscover: wledbeDiscover,
       bt_wledbeAddIp: wledbeAddIp,
+      bt_wledbeSearchIp: wledbeAddIp,
+      bt_wledbeCreateChecked: wledbeCreateChecked,
+      bt_wledbeSearchSubnet: wledbeSearchSubnet,
+      bt_wledbeSearchClose: wledbeSearchClose,
       bt_wledbeRefresh: wledbeRefresh,
       bt_wledbeGroupRefresh: wledbeRefresh,
       bt_wledbeSegmentRefresh: wledbeRefresh,
@@ -822,16 +907,18 @@ window.wledbeHandlers = {
     if (_event.target && _event.target.classList && _event.target.classList.contains('wledbeMember')) {
       wledbeMembersToInput()
     }
-    /* Voir wledbeShowFound : les cases de la découverte ne sont plus dans le
-       document quand le rappel de la fenêtre s'exécute. */
-    if (_event.target && _event.target.classList && _event.target.classList.contains('wledbeFound') && window.wledbeChosen) {
-      window.wledbeChosen[_event.target.getAttribute('data-index')] = _event.target.checked
-    }
   },
   /* Toute saisie dans l'éditeur de scènes le marque comme modifié. */
   input: function (_event) {
     if (_event.target && typeof _event.target.closest === 'function' && _event.target.closest('#div_wledbeSceneList') !== null) {
       wledbeSetDirty(true)
+    }
+  },
+  /* Entrée dans le champ du sous-réseau lance la recherche. */
+  keydown: function (_event) {
+    if (_event.key === 'Enter' && _event.target && _event.target.id === 'in_wledbeSubnet') {
+      _event.preventDefault()
+      wledbeSearchSubnet()
     }
   }
 }
@@ -847,5 +934,17 @@ if (!window.wledbeListening && !window.wledbeListeningV2) {
         window.wledbeHandlers[_type](_event)
       }
     })
+  })
+}
+
+/* La touche Entrée est arrivée avec la 0.4.3 : son écouteur a son propre
+   drapeau, pour qu'un onglet déjà ouvert le reçoive sans recevoir en double
+   les trois autres. */
+if (!window.wledbeListeningKeys) {
+  window.wledbeListeningKeys = true
+  document.addEventListener('keydown', function (_event) {
+    if (window.wledbeHandlers && typeof window.wledbeHandlers.keydown === 'function') {
+      window.wledbeHandlers.keydown(_event)
+    }
   })
 }
