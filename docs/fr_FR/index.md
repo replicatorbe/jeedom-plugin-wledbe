@@ -349,11 +349,18 @@ ce qu'on affiche va dans le **titre**, les options dans le **message** :
 
 Pour un texte qui reste, `durée=0` ; « Arrêter toutes les scènes » le retire.
 
+Le sens inverse utilise la case « Reverse » de l'effet Scrolling Text, que
+seules les versions récentes de WLED ont ; la 0.14 ne l'a pas, et le plugin
+le dit plutôt que d'afficher le texte en miroir. Dans la bibliothèque de
+scènes, la même case se coche par le JSON avancé de la recette matrice :
+`{"seg":{"o3":true}}`.
+
 | Option | Exemple | Par défaut |
 |---|---|---|
 | couleur | `couleur=rouge`, `couleur=#00ff80` | blanc |
 | durée | `durée=30`, `durée=2m`, `durée=0` (sans fin) | 30 s |
 | vitesse | `vitesse=200` (0 à 255) | 128 |
+| sens | `sens=inverse` : le texte défile de gauche à droite | `sens=normal`, de droite à gauche |
 | priorité | `priorité=90` | 60 |
 | délai | `délai=10` | tout de suite |
 | heure | `heure=7:00` | tout de suite |

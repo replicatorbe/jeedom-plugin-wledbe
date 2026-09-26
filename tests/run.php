@@ -726,6 +726,40 @@ check('texte : couleur', $b->state['seg'][0]['col'][0], array(255, 0, 0));
 check('texte : durée', $b->stack()[0]['duration'], 15);
 $b->stopScenes(true);
 check('texte fini : nom de segment effacé', isset($b->state['seg'][0]['n']), false);
+
+/* Sens de défilement : la case « Reverse » (o3) des WLED récents. */
+$fxdataNew = json_decode(file_get_contents(__DIR__ . '/fixtures/strip_json_fxdata.json'), true);
+check('fxdata récent : Scrolling Text a « Reverse »', wledbe::fxdataHasReverse($fxdataNew, 122), true);
+check('fxdata 0.14 : pas de « Reverse »', wledbe::fxdataHasReverse(array(122 => '!,Y Offset,Trail,Font size,,Gradient,Overlay,0;!,!,Gradient;!;2'), 122), false);
+check('fxdata : effet absent', wledbe::fxdataHasReverse($fxdataNew, null), false);
+check('option sens=inverse', wledbe::parseSceneOptions('sens=inverse', null, true), array('reverse' => true));
+check('option sens=normal', wledbe::parseSceneOptions('sens=normal', null, true), array('reverse' => false));
+$err = '';
+try { wledbe::parseSceneOptions('sens=inverse'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('« sens » refusé pour une scène de la bibliothèque', $err !== '', true);
+$err = '';
+try { wledbe::parseSceneOptions('sens=travers', null, true); } catch (Exception $e) { $err = $e->getMessage(); }
+check('sens illisible refusé', $err !== '', true);
+
+$b->state = $si['state'];
+$b->state['seg'][0]['o3'] = false;
+$b->setCache('text_reverse', 1);
+$b->showText('ALERTE', 'sens=inverse durée=5');
+check('texte à l\'envers : Reverse coché', $b->state['seg'][0]['o3'], true);
+check('texte à l\'envers : vérifié', $b->published['verify_ok'], 1);
+$b->stopScenes(true);
+check('texte à l\'envers fini : Reverse rendu', $b->state['seg'][0]['o3'], false);
+$b->state['seg'][0]['o3'] = true;
+$b->showText('ALERTE');
+check('texte normal : Reverse laissé coché par ailleurs décoché', $b->state['seg'][0]['o3'], false);
+$b->stopScenes(true);
+check('texte normal fini : Reverse d\'avant rendu', $b->state['seg'][0]['o3'], true);
+$b->setCache('text_reverse', 0);
+$err = '';
+try { $b->showText('ALERTE', 'sens=inverse'); } catch (Exception $e) { $err = $e->getMessage(); }
+check('WLED sans « Reverse » : refus clair', strpos($err, 'Reverse') !== false, true);
+check('WLED sans « Reverse » : rien de lancé', $b->stack(), array());
+$b->setCache('text_reverse', '');
 $err = '';
 try { $a->showText('X'); } catch (Exception $e) { $err = $e->getMessage(); }
 check('texte refusé sur une bande', strpos($err, 'matrice') !== false, true);

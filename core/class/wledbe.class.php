@@ -1159,6 +1159,8 @@ class wledbe extends eqLogic {
         $palettes = array_map(function ($n) { return wledbe::deviceText($n, 48); }, $palettes);
         $this->setCache('fx_names', $effects);
         $this->setCache('pal_names', $palettes);
+        /* fxdata illisible : inconnu, textCanReverse() redemandera. */
+        $this->setCache('text_reverse', empty($fxdata) ? '' : (self::fxdataHasReverse($fxdata, $this->effectIdByName('Scrolling Text')) ? 1 : 0));
         $this->setCache('preset_names', self::presetList($presets));
 
         $this->updateList('effect_set', self::effectList($effects, $fxdata, $this->isMatrix()));
@@ -1994,6 +1996,16 @@ class wledbe extends eqLogic {
                     }
                     $options['speed'] = max(0, min(255, (int) $value));
                     break;
+                case 'sens':
+                case 'direction':
+                    $map = array('inverse' => true, 'reverse' => true, 'droite' => true, 'right' => true,
+                                 'normal' => false, 'gauche' => false, 'left' => false);
+                    $v = self::slug($value);
+                    if (!$_textOptions || !isset($map[$v])) {
+                        throw new Exception(__('Sens illisible (normal ou inverse) :', __FILE__) . ' ' . $token);
+                    }
+                    $options['reverse'] = $map[$v];
+                    break;
                 default:
                     throw new Exception(__('Option de scène inconnue :', __FILE__) . ' ' . $token);
             }
@@ -2646,6 +2658,34 @@ class wledbe extends eqLogic {
      * #DDMM (WLED 0.14). Les versions récentes acceptent aussi des jetons dans
      * un texte : « Il est #HH:#MM ».
      */
+    /*
+     * Le sens de défilement vient de la troisième case à cocher (« o3 ») de
+     * l'effet Scrolling Text, que les versions récentes de WLED nomment
+     * « Reverse ». La 0.14 ne l'a pas : retourner le segment y inverserait
+     * aussi les lettres. On lit donc le libellé dans /json/fxdata, une fois
+     * par version (refreshLists() le remet à zéro).
+     */
+    public function textCanReverse() {
+        $known = $this->getCache('text_reverse', '');
+        if ($known !== '') {
+            return (bool) $known;
+        }
+        $fxdata = $this->call('GET', '/json/fxdata');
+        $can = self::fxdataHasReverse($fxdata, $this->effectIdByName('Scrolling Text'));
+        $this->setCache('text_reverse', $can ? 1 : 0);
+        return $can;
+    }
+
+    /* Le libellé de la troisième case d'un effet de /json/fxdata : la
+     * première partie liste curseurs puis cases (« !,Y Offset,…,Reverse »). */
+    public static function fxdataHasReverse($_fxdata, $_fx) {
+        if ($_fx === null || !isset($_fxdata[$_fx]) || !is_string($_fxdata[$_fx])) {
+            return false;
+        }
+        $controls = explode(',', explode(';', $_fxdata[$_fx])[0]);
+        return isset($controls[7]) && strtolower(trim($controls[7])) === 'reverse';
+    }
+
     public function showText($_text, $_options = '') {
         if (!$this->isMatrix()) {
             throw new Exception(__('Le texte défilant ne s\'affiche que sur une matrice.', __FILE__));
@@ -2656,6 +2696,11 @@ class wledbe extends eqLogic {
         }
         $options = self::parseSceneOptions($_options, null, true);
         $color = isset($options['color']) ? $options['color'] : '#ffffff';
+        $reverse = !empty($options['reverse']);
+        if ($reverse && !$this->textCanReverse()) {
+            throw new Exception(sprintf(__('Ce WLED (version %s) ne sait pas faire défiler un texte à l\'envers : l\'effet Scrolling Text n\'a pas encore l\'option « Reverse ». Mettez WLED à jour.', __FILE__),
+                $this->getConfiguration('version')));
+        }
         /* Identifiant réservé, qu'aucune scène de la bibliothèque ne peut
          * prendre (saveScenes() retire le souligné initial). */
         $scene = array(
@@ -2666,9 +2711,13 @@ class wledbe extends eqLogic {
             'strip' => array('effect' => 'Solid', 'colors' => array($color)),
             'matrix' => array('enabled' => 1, 'effect' => 'Scrolling Text', 'colors' => array($color, '#000000', '#000000'),
                               'brightness' => 100, 'speed' => isset($options['speed']) ? $options['speed'] : 128,
-                              'intensity' => 128, 'text' => $text),
+                              'intensity' => 128, 'text' => $text,
+                              /* Toujours posé : un « Reverse » laissé coché par un autre
+                               * usage de l'effet ne doit pas retourner le texte. La
+                               * restauration rend la valeur d'avant. */
+                              'json' => json_encode(array('seg' => array('o3' => $reverse)))),
         );
-        unset($options['color'], $options['speed']);
+        unset($options['color'], $options['speed'], $options['reverse']);
         $options['adhoc'] = true;
         return $this->playScene($scene, $options);
     }

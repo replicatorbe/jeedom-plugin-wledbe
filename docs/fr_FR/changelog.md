@@ -1,5 +1,14 @@
 # Changelog — plugin WLED
 
+## 0.4.2 (beta)
+
+- Texte sur matrice : option `sens=inverse`, le texte défile de gauche à
+  droite. Elle coche la case « Reverse » de l'effet Scrolling Text, présente
+  sur les versions récentes de WLED ; sur une version qui ne l'a pas (0.14),
+  le plugin refuse avec un message clair au lieu d'afficher le texte en
+  miroir. Un texte normal décoche cette case si un autre usage l'avait
+  laissée cochée ; la fin du texte rend sa valeur d'avant.
+
 ## 0.4.1 (beta)
 
 - Matrices : la commande « Afficher un texte » est visible sur le dashboard.
