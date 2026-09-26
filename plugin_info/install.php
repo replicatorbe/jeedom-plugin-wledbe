@@ -28,6 +28,7 @@ function wledbe_install() {
 function wledbe_update() {
     try {
         wledbe::rebuildCommands();
+        wledbe::showTextCommands();
     } catch (Throwable $e) {
         log::add('wledbe', 'error', __('Mise à jour du plugin :', __FILE__) . ' ' . $e->getMessage());
     }

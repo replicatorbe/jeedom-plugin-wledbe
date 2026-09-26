@@ -341,6 +341,14 @@ Sur une matrice, la commande **Afficher un texte** fait défiler un texte, le
 temps voulu, puis rend l'affichage d'avant. Comme pour « Lancer une scène »,
 ce qu'on affiche va dans le **titre**, les options dans le **message** :
 
+- **depuis le dashboard** : la commande est affichée sur la tuile de la
+  matrice, avec deux champs. Écrivez le texte dans le premier, les options
+  (facultatives) dans le second, puis validez ;
+- **depuis un scénario** : action sur la commande, texte en titre, options en
+  message.
+
+Pour un texte qui reste, `durée=0` ; « Arrêter toutes les scènes » le retire.
+
 | Option | Exemple | Par défaut |
 |---|---|---|
 | couleur | `couleur=rouge`, `couleur=#00ff80` | blanc |

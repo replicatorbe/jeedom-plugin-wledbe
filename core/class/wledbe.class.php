@@ -3295,8 +3295,11 @@ class wledbe extends eqLogic {
         $this->syncSceneCommands(self::scenes());
     }
 
+    /* Visible sur une matrice : écrire un texte depuis le dashboard est ce
+     * qu'on attend d'elle. Cachée sur un groupe, qui n'en a pas forcément. */
     private function addTextCommand() {
         $this->addCmdIfMissing('text_show', 'Afficher un texte', 'action', 'message', array('order' => 210,
+            'isVisible' => $this->isGroup() ? 0 : 1,
             'display' => array('title_placeholder' => __('Texte à faire défiler (32 caractères)', __FILE__),
                                'message_placeholder' => 'couleur=rouge durée=30 vitesse=200')));
         /* La 0.3 avait les deux champs dans l'autre sens : on remet les
@@ -3462,6 +3465,23 @@ class wledbe extends eqLogic {
         }
         $cmd->save();
         return $cmd;
+    }
+
+    /* Jusqu'à la 0.4.0, « Afficher un texte » naissait cachée : rendue
+     * visible une fois, sur les matrices. Ensuite, la visibilité redevient
+     * le choix de l'utilisateur. */
+    public static function showTextCommands() {
+        if (config::byKey('text_cmd_shown', __CLASS__, 0) == 1) {
+            return;
+        }
+        foreach (self::byType(__CLASS__) as $eqLogic) {
+            $cmd = $eqLogic->isMatrix() && !$eqLogic->isGroup() ? $eqLogic->getCmd('action', 'text_show') : null;
+            if (is_object($cmd) && !$cmd->getIsVisible()) {
+                $cmd->setIsVisible(1);
+                $cmd->save();
+            }
+        }
+        config::save('text_cmd_shown', 1, __CLASS__);
     }
 
     public static function rebuildCommands() {

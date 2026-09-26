@@ -1,5 +1,12 @@
 # Changelog — plugin WLED
 
+## 0.4.1 (beta)
+
+- Matrices : la commande « Afficher un texte » est visible sur le dashboard.
+  Elle naissait cachée, et on ne pouvait écrire un texte que depuis un
+  scénario. Les matrices existantes la voient apparaître une fois, à la
+  mise à jour du plugin ; la cacher de nouveau reste possible.
+
 ## 0.4.0 (beta)
 
 - Segments : chaque segment d'un WLED peut devenir un équipement à part, une

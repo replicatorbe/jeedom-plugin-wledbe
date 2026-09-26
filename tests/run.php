@@ -731,6 +731,8 @@ try { $a->showText('X'); } catch (Exception $e) { $err = $e->getMessage(); }
 check('texte refusé sur une bande', strpos($err, 'matrice') !== false, true);
 check('commande « Afficher un texte » sur la matrice', is_object($b->getCmd('action', 'text_show')), true);
 check('pas sur la bande', $a->getCmd('action', 'text_show'), null);
+check('« Afficher un texte » visible sur la matrice (dashboard)', $b->getCmd('action', 'text_show')->isVisible, 1);
+check('« Afficher un texte » cachée sur un groupe', $g->getCmd('action', 'text_show')->isVisible ?? null, 0);
 
 /* ------------------------------------------------------------------------ */
 section('V3 : état poussé et garde');
