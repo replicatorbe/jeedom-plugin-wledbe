@@ -66,7 +66,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 		<?php
 		$wledbeHasDevice = false;
 		foreach ($eqLogics as $wledbeEq) {
-			$wledbeHasDevice = $wledbeHasDevice || !$wledbeEq->isGroup();
+			$wledbeHasDevice = $wledbeHasDevice || (!$wledbeEq->isGroup() && !$wledbeEq->isSegment());
 		}
 		if (!$wledbeHasDevice) {
 			echo '<div class="alert alert-info" style="margin:5px;">';
@@ -85,8 +85,9 @@ $eqLogics = eqLogic::byType($plugin->getId());
 		echo '<a class="btn roundedRight hidden" id="bt_pluginDisplayAsTable" data-coreSupport="1" data-state="0"><i class="fas fa-grip-lines"></i></a>';
 		echo '</div>';
 		echo '</div>';
-		$devices = array_filter($eqLogics, function ($e) { return !$e->isGroup(); });
+		$devices = array_filter($eqLogics, function ($e) { return !$e->isGroup() && !$e->isSegment(); });
 		$groups = array_filter($eqLogics, function ($e) { return $e->isGroup(); });
+		$segments = array_filter($eqLogics, function ($e) { return $e->isSegment(); });
 		echo '<div class="eqLogicThumbnailContainer">';
 		foreach ($devices as $eqLogic) {
 			$opacity = ($eqLogic->getIsEnable()) ? '' : 'disableCard';
@@ -103,6 +104,23 @@ $eqLogics = eqLogic::byType($plugin->getId());
 			echo '</div>';
 		}
 		echo '</div>';
+		if (count($segments) > 0) {
+			echo '<legend><i class="fas fa-grip-lines-vertical"></i> {{Mes segments}}</legend>';
+			echo '<div class="eqLogicThumbnailContainer">';
+			foreach ($segments as $eqLogic) {
+				$opacity = ($eqLogic->getIsEnable()) ? '' : 'disableCard';
+				echo '<div class="eqLogicDisplayCard cursor ' . $opacity . '" data-eqLogic_id="' . $eqLogic->getId() . '">';
+				echo '<i class="fas fa-grip-lines-vertical" style="font-size:4em;"></i>';
+				echo '<br>';
+				echo '<span class="name">' . $eqLogic->getHumanName(true, true) . '</span>';
+				echo '<span class="hiddenAsCard displayTableRight hidden">';
+				echo '<span class="label label-info">{{Segment}} ' . $eqLogic->segmentId() . '</span> ';
+				echo ($eqLogic->getIsVisible() == 1) ? '<i class="fas fa-eye" title="{{Equipement visible}}"></i>' : '<i class="fas fa-eye-slash" title="{{Equipement non visible}}"></i>';
+				echo '</span>';
+				echo '</div>';
+			}
+			echo '</div>';
+		}
 		if (count($groups) > 0) {
 			echo '<legend><i class="fas fa-object-group"></i> {{Mes groupes}}</legend>';
 			echo '<div class="eqLogicThumbnailContainer">';
@@ -202,7 +220,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 							<div class="form-group">
 								<div class="col-sm-12">
 									<?php
-									$wledbeDevices = array_filter($eqLogics, function ($e) { return !$e->isGroup(); });
+									$wledbeDevices = array_filter($eqLogics, function ($e) { return !$e->isGroup() && !$e->isSegment(); });
 									if (count($wledbeDevices) === 0) {
 										echo '<div class="alert alert-warning">{{Aucun WLED à regrouper : créez d\'abord vos appareils.}}</div>';
 									}
@@ -232,6 +250,19 @@ $eqLogics = eqLogic::byType($plugin->getId());
 									<span class="help-block" style="margin:0;">{{Si elle change, la découverte la retrouve grâce à l'adresse MAC.}}</span>
 								</div>
 							</div>
+						</fieldset>
+						<fieldset class="wledbeSegmentOnly" style="display:none;">
+							<legend><i class="fas fa-grip-lines-vertical"></i> {{Segment}}</legend>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{WLED}}</label>
+								<div class="col-sm-9">
+									<a id="a_wledbeParent" href="#"></a>
+									<span class="label label-info" id="span_wledbeSegmentId" style="margin-left:6px;"></span>
+									<span class="help-block" style="margin:4px 0 0 0;">{{Ce segment passe par son WLED : adresse, relevé et connexion directe sont ceux de l'appareil. Allumer la zone quand le WLED est éteint n'allume qu'elle ; éteindre la dernière zone allumée éteint le WLED.}}</span>
+								</div>
+							</div>
+						</fieldset>
+						<fieldset class="wledbeLightOnly">
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Vérifier les ordres}}</label>
 								<div class="col-sm-9">
@@ -239,7 +270,8 @@ $eqLogics = eqLogic::byType($plugin->getId());
 									<span class="help-block" style="margin:4px 0 0 0;">{{Après chaque ordre, le plugin relit l'état appliqué par WLED et relance l'ordre s'il s'est perdu. Un échec définitif est signalé dans le centre de messages et par la commande « Vérification ».}}</span>
 								</div>
 							</div>
-
+						</fieldset>
+						<fieldset class="wledbeDeviceOnly">
 							<legend><i class="fas fa-info-circle"></i> {{Identité}}</legend>
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Nom dans WLED}}</label>
@@ -274,6 +306,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 									<a class="btn btn-default btn-sm" id="bt_wledbeRefresh"><i class="fas fa-sync"></i> {{Relever maintenant}}</a>
 									<a class="btn btn-default btn-sm" id="bt_wledbeLists"><i class="fas fa-list"></i> {{Relire effets, palettes et presets}}</a>
 									<a class="btn btn-default btn-sm" id="bt_wledbeOpen" target="_blank"><i class="fas fa-external-link-alt"></i> {{Interface WLED}}</a>
+									<a class="btn btn-default btn-sm" id="bt_wledbeSegments" title="{{Crée un équipement par segment de ce WLED qui n'en a pas encore : chaque zone devient une lumière à part.}}"><i class="fas fa-grip-lines-vertical"></i> {{Créer les segments}}</a>
 									<br>
 									<span id="span_wledbeStatus" style="display:inline-block;margin-top:6px;"></span>
 								</div>
@@ -289,6 +322,11 @@ $eqLogics = eqLogic::byType($plugin->getId());
 				<div class="col-xs-12">
 					<div class="alert alert-info" id="div_wledbeState">{{Chargement…}}</div>
 					<div id="div_wledbeMembers"></div>
+					<div class="wledbeSegmentOnly" style="display:none;margin-bottom:10px;">
+						<a class="btn btn-default btn-sm" id="bt_wledbeSegmentRefresh"><i class="fas fa-sync"></i> {{Relever le WLED}}</a>
+						<legend><i class="fas fa-code"></i> {{Segment dans le dernier état du WLED}}</legend>
+						<pre id="pre_wledbeSegmentRaw" style="max-height:520px;overflow:auto;"></pre>
+					</div>
 					<div class="wledbeGroupOnly" style="display:none;margin-bottom:10px;">
 						<a class="btn btn-default btn-sm" id="bt_wledbeGroupRefresh"><i class="fas fa-sync"></i> {{Actualiser l'état des membres}}</a>
 					</div>

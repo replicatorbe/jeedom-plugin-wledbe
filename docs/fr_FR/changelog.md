@@ -1,5 +1,15 @@
 # Changelog — plugin WLED
 
+## 0.4.0 (beta)
+
+- Segments : chaque segment d'un WLED peut devenir un équipement à part, une
+  lumière complète (état, luminosité, couleur, effet, palette, vitesse,
+  intensité, JSON), créée par le bouton « Créer les segments » de la page du
+  WLED. L'état suit en direct, par le WLED, qui reste seul relevé et
+  vérifié. Allumer une zone d'un WLED éteint n'allume qu'elle ; éteindre la
+  dernière zone allumée éteint le WLED. Une commande de segment abandonne
+  les scènes de son WLED ; supprimer le WLED supprime ses segments.
+
 ## 0.3.4 (beta)
 
 - Relevé : un WLED en connexion directe (État instantané) n'est plus relu

@@ -374,6 +374,9 @@ class wledbe extends eqLogic {
         if ($this->getConfiguration('verify', '') === '') {
             $this->setConfiguration('verify', 1);
         }
+        if ($this->isSegment()) {
+            return;
+        }
         if ($this->isGroup()) {
             /* En texte « 12,34 » et non en liste : la page du coeur ne sait
              * mettre qu'un texte dans un champ, et une liste reviendrait
@@ -391,6 +394,14 @@ class wledbe extends eqLogic {
 
     public function postSave() {
         $this->createCommands();
+        if ($this->isSegment()) {
+            try {
+                $this->copyListsFrom($this->device());
+            } catch (Throwable $e) {
+                log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . $e->getMessage());
+            }
+            return;
+        }
         if ($this->isGroup()) {
             $this->refreshGroupLists();
             $this->refreshGroup();
@@ -413,6 +424,17 @@ class wledbe extends eqLogic {
 
     public function postRemove() {
         cache::set($this->sceneKey(), array());
+        if ($this->isSegment()) {
+            return;
+        }
+        /* Un segment sans son WLED ne pilote plus rien. */
+        foreach ($this->segments() as $segment) {
+            try {
+                $segment->remove();
+            } catch (Throwable $e) {
+                log::add(__CLASS__, 'error', $segment->getHumanName() . ' : ' . $e->getMessage());
+            }
+        }
         self::notifyDaemon();
         if (!$this->isGroup()) {
             foreach ($this->groups() as $group) {
@@ -434,6 +456,139 @@ class wledbe extends eqLogic {
 
     public function isMatrix() {
         return $this->getConfiguration('layout', 'strip') === 'matrix';
+    }
+
+    /* ============================================================ SEGMENTS */
+
+    /*
+     * Un segment est un équipement du plugin qui pilote une zone d'un WLED :
+     * le segment « id » de l'appareil « parent ». Il n'a pas d'adresse à lui :
+     * tout passe par son WLED, qui reste seul relevé, suivi en direct et
+     * vérifié ; chaque état relu est redistribué à ses segments
+     * (publishState()). Une zone devient ainsi une lumière à part entière
+     * pour Jeedom et les applis domotiques.
+     */
+    public function isSegment() {
+        return $this->getConfiguration('kind', 'device') === 'segment';
+    }
+
+    public function segmentId() {
+        return (int) $this->getConfiguration('segment', 0);
+    }
+
+    /* Le WLED de cet équipement : lui-même, ou celui d'un segment. */
+    public function device() {
+        if (!$this->isSegment()) {
+            return $this;
+        }
+        $parent = self::byId((int) $this->getConfiguration('parent', 0));
+        if (!is_object($parent) || $parent->getEqType_name() !== __CLASS__ || $parent->isGroup() || $parent->isSegment()) {
+            throw new Exception(__('Le WLED de ce segment n\'existe plus.', __FILE__));
+        }
+        if (!$parent->getIsEnable()) {
+            throw new Exception(sprintf(__('Le WLED de ce segment (%s) est désactivé.', __FILE__), $parent->getHumanName()));
+        }
+        return $parent;
+    }
+
+    /* Les équipements des segments de ce WLED. */
+    public function segments() {
+        if ($this->isSegment() || $this->isGroup() || $this->getId() == '') {
+            return array();
+        }
+        $segments = array();
+        foreach (self::byType(__CLASS__) as $eqLogic) {
+            if ($eqLogic->isSegment() && (int) $eqLogic->getConfiguration('parent', 0) === (int) $this->getId()) {
+                $segments[] = $eqLogic;
+            }
+        }
+        return $segments;
+    }
+
+    /* Le segment « id » d'un état WLED, ou null s'il n'existe pas (plus). */
+    public static function segmentOf($_state, $_id) {
+        foreach ((isset($_state['seg']) && is_array($_state['seg'])) ? $_state['seg'] : array() as $rank => $seg) {
+            if (is_array($seg) && (isset($seg['id']) ? (int) $seg['id'] : (int) $rank) === (int) $_id) {
+                return $seg;
+            }
+        }
+        return null;
+    }
+
+    /*
+     * Crée un équipement par segment de ce WLED qui n'en a pas encore. Rend
+     * les noms créés. Un segment supprimé de WLED garde son équipement, qui
+     * passe « hors ligne » : c'est à l'utilisateur de le retirer.
+     */
+    public function createSegments() {
+        if ($this->isSegment() || $this->isGroup()) {
+            throw new Exception(__('Seul un WLED a des segments.', __FILE__));
+        }
+        $state = $this->call('GET', '/json/state');
+        $count = count(isset($state['seg']) && is_array($state['seg']) ? $state['seg'] : array());
+        /* Un seul segment, c'est l'appareil entier : son équipement suffit. */
+        if ($count <= 1) {
+            return array('created' => array(), 'segments' => $count);
+        }
+        $existing = array();
+        foreach ($this->segments() as $segment) {
+            $existing[$segment->segmentId()] = true;
+        }
+        $created = array();
+        foreach ((isset($state['seg']) && is_array($state['seg'])) ? $state['seg'] : array() as $rank => $seg) {
+            if (!is_array($seg)) {
+                continue;
+            }
+            $id = isset($seg['id']) ? (int) $seg['id'] : (int) $rank;
+            if (isset($existing[$id])) {
+                continue;
+            }
+            /* Le nom posé par une scène de texte n'est pas celui de la zone. */
+            $label = isset($seg['n']) && (string) $this->sceneGet('applied_key', '') === '' ? self::deviceText($seg['n'], 32) : '';
+            $base = $this->getName() . ' ' . ($label !== '' ? $label : sprintf(__('segment %d', __FILE__), $id));
+            $eqLogic = new self();
+            $eqLogic->setEqType_name(__CLASS__);
+            $eqLogic->setConfiguration('kind', 'segment');
+            $eqLogic->setConfiguration('parent', (int) $this->getId());
+            $eqLogic->setConfiguration('segment', $id);
+            $eqLogic->setConfiguration('verify', 1);
+            $eqLogic->setObject_id($this->getObject_id());
+            $eqLogic->setIsEnable(1);
+            $eqLogic->setIsVisible(1);
+            $eqLogic->setCategory('light', 1);
+            if ($this->getLogicalId() !== '') {
+                $eqLogic->setLogicalId($this->getLogicalId() . '-seg' . $id);
+            }
+            for ($try = 1; $try <= 10; $try++) {
+                $eqLogic->setName($try === 1 ? $base : $base . ' ' . $try);
+                try {
+                    $eqLogic->save();
+                    break;
+                } catch (Throwable $e) {
+                    if ($try === 10) {
+                        throw $e;
+                    }
+                }
+            }
+            $created[] = $eqLogic->getHumanName();
+        }
+        if (!empty($created)) {
+            $this->publishState($state);
+        }
+        return array('created' => $created, 'segments' => $count);
+    }
+
+    /* Les listes d'effets et de palettes d'un segment sont celles de son
+     * WLED, numéros compris. */
+    private function copyListsFrom($_device) {
+        foreach (array('effect_set', 'palette_set') as $logicalId) {
+            $from = $_device->getCmd('action', $logicalId);
+            $to = $this->getCmd('action', $logicalId);
+            if (is_object($from) && is_object($to) && $to->getConfiguration('listValue', '') !== $from->getConfiguration('listValue', '')) {
+                $to->setConfiguration('listValue', $from->getConfiguration('listValue', ''));
+                $to->save();
+            }
+        }
     }
 
     /* ======================================================== HTTP */
@@ -479,6 +634,9 @@ class wledbe extends eqLogic {
 
     /* Appel vers l'appareil de cet équipement ; rend le JSON décodé. */
     public function call($_method, $_path, $_body = null) {
+        if ($this->isSegment()) {
+            return $this->device()->call($_method, $_path, $_body);
+        }
         if (!$this->isConfigured()) {
             throw new Exception(__('Aucune adresse IP n\'est renseignée.', __FILE__));
         }
@@ -1013,6 +1171,9 @@ class wledbe extends eqLogic {
         foreach ($this->groups() as $group) {
             $group->refreshGroupLists();
         }
+        foreach ($this->segments() as $segment) {
+            $segment->copyListsFrom($this);
+        }
         return array('effects' => count($effects), 'palettes' => count($palettes), 'presets' => count(self::presetList($presets)));
     }
 
@@ -1039,7 +1200,7 @@ class wledbe extends eqLogic {
     /* Numéro d'un effet d'après son nom, sur cet appareil. */
     public function effectIdByName($_name) {
         $wanted = strtolower(trim((string) $_name));
-        foreach ((array) $this->getCache('fx_names', array()) as $id => $name) {
+        foreach ((array) $this->device()->getCache('fx_names', array()) as $id => $name) {
             if (strtolower(trim((string) $name)) === $wanted) {
                 return (int) $id;
             }
@@ -1107,8 +1268,7 @@ class wledbe extends eqLogic {
                 }
             }
         }
-        $this->publishValues(self::stateValues($state, $info,
-            $this->getCache('fx_names', array()), $this->getCache('pal_names', array())));
+        $this->publishState($state, $info);
         return true;
     }
 
@@ -1137,26 +1297,7 @@ class wledbe extends eqLogic {
         if (isset($_state['ps'])) {
             $values['preset'] = (int) $_state['ps'];
         }
-        $seg = self::mainSegment($_state);
-        if (isset($seg['col'][0])) {
-            $values['color'] = self::colorToHex($seg['col'][0]);
-        }
-        if (isset($seg['fx'])) {
-            $fx = (int) $seg['fx'];
-            $values['effect_id'] = $fx;
-            $values['effect'] = isset($_fxNames[$fx]) ? (string) $_fxNames[$fx] : '#' . $fx;
-        }
-        if (isset($seg['pal'])) {
-            $pal = (int) $seg['pal'];
-            $values['palette_id'] = $pal;
-            $values['palette'] = isset($_palNames[$pal]) ? (string) $_palNames[$pal] : '#' . $pal;
-        }
-        if (isset($seg['sx'])) {
-            $values['speed'] = (int) $seg['sx'];
-        }
-        if (isset($seg['ix'])) {
-            $values['intensity'] = (int) $seg['ix'];
-        }
+        $values += self::segValues(self::mainSegment($_state), $_fxNames, $_palNames);
         if (isset($_info['live'])) {
             $values['live'] = $_info['live'] ? 1 : 0;
         }
@@ -1176,6 +1317,74 @@ class wledbe extends eqLogic {
             $values['version'] = self::deviceText($_info['ver'], 32);
         }
         return $values;
+    }
+
+    /* Aspect d'un segment : couleur, effet, palette, vitesse, intensité. */
+    public static function segValues($_seg, $_fxNames, $_palNames) {
+        $values = array();
+        if (isset($_seg['col'][0])) {
+            $values['color'] = self::colorToHex($_seg['col'][0]);
+        }
+        if (isset($_seg['fx'])) {
+            $fx = (int) $_seg['fx'];
+            $values['effect_id'] = $fx;
+            $values['effect'] = isset($_fxNames[$fx]) ? (string) $_fxNames[$fx] : '#' . $fx;
+        }
+        if (isset($_seg['pal'])) {
+            $pal = (int) $_seg['pal'];
+            $values['palette_id'] = $pal;
+            $values['palette'] = isset($_palNames[$pal]) ? (string) $_palNames[$pal] : '#' . $pal;
+        }
+        if (isset($_seg['sx'])) {
+            $values['speed'] = (int) $_seg['sx'];
+        }
+        if (isset($_seg['ix'])) {
+            $values['intensity'] = (int) $_seg['ix'];
+        }
+        return $values;
+    }
+
+    /*
+     * Valeurs d'un segment dans un état WLED complet. Une zone n'éclaire que
+     * si le WLED et le segment sont allumés : c'est ce que dit « Etat ». La
+     * luminosité est celle du segment, que WLED multiplie par la générale.
+     */
+    public static function segmentValues($_state, $_id, $_fxNames, $_palNames) {
+        $seg = self::segmentOf($_state, $_id);
+        if ($seg === null) {
+            return null;
+        }
+        $values = array('on' => (!empty($_state['on']) && !empty($seg['on'])) ? 1 : 0);
+        if (isset($seg['bri'])) {
+            $values['brightness'] = (int) round(((int) $seg['bri']) / 2.55);
+        }
+        return $values + self::segValues($seg, $_fxNames, $_palNames);
+    }
+
+    /*
+     * Un état relu sur un WLED (relevé, état poussé, réponse à un ordre) :
+     * publié sur l'équipement du WLED et sur ceux de ses segments. Appelé
+     * depuis un segment, c'est l'état de son WLED : tous en profitent.
+     */
+    public function publishState($_state, $_info = array()) {
+        $device = $this->device();
+        $fx = $device->getCache('fx_names', array());
+        $pal = $device->getCache('pal_names', array());
+        $device->publishValues(self::stateValues($_state, $_info, $fx, $pal));
+        $segments = $device->segments();
+        if (empty($segments)) {
+            return;
+        }
+        /* Gardé pour les ordres des segments, qui en ont besoin pour savoir
+         * quelles zones sont allumées. */
+        $device->setCache('last_state', $_state);
+        foreach ($segments as $segment) {
+            $values = self::segmentValues($_state, $segment->segmentId(), $fx, $pal);
+            $segment->publishCmd('online', $values === null ? 0 : 1);
+            if ($values !== null) {
+                $segment->publishValues($values);
+            }
+        }
     }
 
     public static function colorToHex($_color) {
@@ -1427,6 +1636,8 @@ class wledbe extends eqLogic {
             throw new Exception(__('Ordre WLED vide.', __FILE__));
         }
         $verify = (int) $this->getConfiguration('verify', 1) === 1;
+        /* Joignable ou non, c'est le WLED : un segment n'a pas d'adresse. */
+        $device = $this->device();
         $tries = self::isIdempotent($_fragment) ? self::tries() : 1;
         $body = $_fragment;
         $body['v'] = true;
@@ -1444,7 +1655,7 @@ class wledbe extends eqLogic {
                 if (!isset($state['on'])) {
                     $state = $this->call('GET', '/json/state');
                 }
-                $this->clearFailure();
+                $device->clearFailure();
                 $diff = $verify ? self::mismatches($_fragment, $state) : array();
                 if (!empty($diff)) {
                     usleep(self::SETTLE_MS * 1000);
@@ -1453,12 +1664,11 @@ class wledbe extends eqLogic {
                 }
             } catch (Throwable $e) {
                 $problem = $e->getMessage();
-                $this->noteFailure($problem);
+                $device->noteFailure($problem);
                 log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . sprintf(__('essai %d/%d : %s', __FILE__), $attempt, $tries, $problem));
                 continue;
             }
-            $this->publishValues(self::stateValues($state, array(),
-                $this->getCache('fx_names', array()), $this->getCache('pal_names', array())));
+            $this->publishState($state);
             if (empty($diff)) {
                 $this->verifyDone(true, $verify ? ($attempt === 1 ? __('OK', __FILE__)
                     : sprintf(__('OK après %d essais', __FILE__), $attempt)) : __('non vérifié', __FILE__));
@@ -1868,7 +2078,7 @@ class wledbe extends eqLogic {
 
     public function paletteIdByName($_name) {
         $wanted = strtolower(trim((string) $_name));
-        foreach ((array) $this->getCache('pal_names', array()) as $id => $name) {
+        foreach ((array) $this->device()->getCache('pal_names', array()) as $id => $name) {
             if (strtolower(trim((string) $name)) === $wanted) {
                 return (int) $id;
             }
@@ -2551,7 +2761,7 @@ class wledbe extends eqLogic {
             $verify = (int) $eq->getConfiguration('verify', 1) === 1;
             if (is_array($state) && isset($state['on']) && (!$verify || empty(self::mismatches($fragment, $state)))) {
                 $eq->clearFailure();
-                $eq->publishValues(self::stateValues($state, array(), $eq->getCache('fx_names', array()), $eq->getCache('pal_names', array())));
+                $eq->publishState($state);
                 $eq->verifyDone(true, $verify ? __('OK', __FILE__) : __('non vérifié', __FILE__));
                 continue;
             }
@@ -2559,7 +2769,7 @@ class wledbe extends eqLogic {
              * s'appliquerait deux fois. On relit seulement l'état. */
             if (!self::isIdempotent($fragment)) {
                 try {
-                    $eq->publishValues(self::stateValues($eq->call('GET', '/json/state'), array(), $eq->getCache('fx_names', array()), $eq->getCache('pal_names', array())));
+                    $eq->publishState($eq->call('GET', '/json/state'));
                     $eq->verifyDone(true, __('non vérifié (ordre relatif)', __FILE__));
                 } catch (Throwable $e) {
                     $errors[] = $eq->getHumanName() . ' : ' . $e->getMessage();
@@ -2810,6 +3020,9 @@ class wledbe extends eqLogic {
         if ($this->isGroup()) {
             return $this->runGroupAction($_logicalId, $_options);
         }
+        if ($this->isSegment()) {
+            return $this->runSegmentAction($_logicalId, $_options);
+        }
         if (strpos($_logicalId, 'scene::') === 0) {
             return $this->startScene(substr($_logicalId, 7));
         }
@@ -2842,12 +3055,99 @@ class wledbe extends eqLogic {
         return $fragment === null ? true : $this->sendState($fragment);
     }
 
+    /* Les commandes d'un segment. Un geste sur une zone est un geste
+     * manuel sur son WLED : ses scènes sont abandonnées, comme pour une
+     * commande de l'appareil. */
+    private function runSegmentAction($_logicalId, $_options) {
+        $device = $this->device();
+        if ($_logicalId === 'refresh') {
+            return $device->pollNow();
+        }
+        $device->abandonScenes();
+        if ($_logicalId === 'toggle') {
+            $_logicalId = $this->isOn(true) ? 'off_set' : 'on_set';
+        }
+        $fragment = $this->fragmentFor($_logicalId, $_options);
+        return $fragment === null ? true : $this->sendState($fragment);
+    }
+
+    /*
+     * L'ordre d'un segment. WLED n'éclaire une zone que si l'appareil entier
+     * est allumé, et allumer l'appareil rallume toutes les zones restées
+     * allumées de son côté. Allumer une zone d'un WLED éteint éteint donc les
+     * autres : seule celle qu'on demande s'allume. Éteindre la dernière zone
+     * allumée éteint le WLED, pour que son « Etat » dise la vérité.
+     */
+    private function segmentFragment($_logicalId, $_options) {
+        $id = $this->segmentId();
+        $state = $this->device()->getCache('last_state', array());
+        $state = is_array($state) ? $state : array();
+        $light = function ($_props) use ($id, $state) {
+            $segs = array(array('id' => $id, 'on' => true) + $_props);
+            if (empty($state['on'])) {
+                foreach ((isset($state['seg']) && is_array($state['seg'])) ? $state['seg'] : array() as $rank => $seg) {
+                    $other = isset($seg['id']) ? (int) $seg['id'] : (int) $rank;
+                    if ($other !== $id) {
+                        $segs[] = array('id' => $other, 'on' => false);
+                    }
+                }
+            }
+            return array('on' => true, 'seg' => $segs);
+        };
+        $only = function ($_props) use ($id) {
+            return array('seg' => array(array('id' => $id) + $_props));
+        };
+        switch ($_logicalId) {
+            case 'on_set':
+                return $light(array());
+            case 'off_set':
+                $othersOn = false;
+                foreach ((isset($state['seg']) && is_array($state['seg'])) ? $state['seg'] : array() as $rank => $seg) {
+                    $other = isset($seg['id']) ? (int) $seg['id'] : (int) $rank;
+                    $othersOn = $othersOn || ($other !== $id && !empty($seg['on']));
+                }
+                $fragment = $only(array('on' => false));
+                if (!$othersOn && !empty($state)) {
+                    $fragment['on'] = false;
+                }
+                return $fragment;
+            case 'brightness_set':
+                $pct = max(0, min(100, (int) (isset($_options['slider']) ? $_options['slider'] : 100)));
+                if ($pct === 0) {
+                    return $this->segmentFragment('off_set', array());
+                }
+                return $light(array('bri' => max(1, (int) round($pct * 2.55))));
+            case 'color_set':
+                return $light(array('col' => array(self::hexToColor(isset($_options['color']) ? $_options['color'] : ''))));
+            case 'effect_set':
+                return $light(array('fx' => $this->resolveEffect($_options)));
+            case 'palette_set':
+            case 'speed_set':
+            case 'intensity_set':
+                $fragment = $this->deviceFragment($_logicalId, $_options);
+                return $only($fragment['seg']);
+            case 'json_set':
+                /* Le JSON d'un segment décrit le segment : {"fx":1}. */
+                $props = json_decode(isset($_options['message']) ? (string) $_options['message'] : '', true);
+                if (!is_array($props) || empty($props) || array_keys($props) === range(0, count($props) - 1)) {
+                    throw new Exception(__('JSON illisible : attendu un objet de segment comme {"fx":1,"col":[[255,0,0]]}.', __FILE__));
+                }
+                unset($props['id']);
+                return $only($props);
+        }
+        return null;
+    }
+
     /* L'appareil est-il allumé ? $_fresh : relu sur l'appareil, sinon la
-     * dernière valeur connue. */
+     * dernière valeur connue. Pour un segment : son WLED et lui. */
     public function isOn($_fresh) {
         if ($_fresh) {
             try {
                 $state = $this->call('GET', '/json/state');
+                if ($this->isSegment()) {
+                    $seg = self::segmentOf($state, $this->segmentId());
+                    return !empty($state['on']) && $seg !== null && !empty($seg['on']);
+                }
                 return !empty($state['on']);
             } catch (Throwable $e) {
             }
@@ -2860,6 +3160,10 @@ class wledbe extends eqLogic {
      * l'équipement et aux groupes : un effet ou une palette désignés par leur
      * nom sont résolus appareil par appareil. null : rien à envoyer. */
     public function fragmentFor($_logicalId, $_options) {
+        return $this->isSegment() ? $this->segmentFragment($_logicalId, $_options) : $this->deviceFragment($_logicalId, $_options);
+    }
+
+    private function deviceFragment($_logicalId, $_options) {
         switch ($_logicalId) {
             case 'on_set':
                 return array('on' => true);
@@ -2934,6 +3238,10 @@ class wledbe extends eqLogic {
             $this->createGroupCommands();
             return;
         }
+        if ($this->isSegment()) {
+            $this->createSegmentCommands();
+            return;
+        }
         $on = $this->addCmdIfMissing('on', 'Etat', 'info', 'binary', array('order' => 1, 'generic' => 'LIGHT_STATE_BOOL'));
         $bri = $this->addCmdIfMissing('brightness', 'Luminosité', 'info', 'numeric', array(
             'order' => 2, 'generic' => 'LIGHT_BRIGHTNESS', 'unite' => '%', 'min' => 0, 'max' => 100));
@@ -2999,6 +3307,43 @@ class wledbe extends eqLogic {
             $cmd->setDisplay('message_placeholder', 'couleur=rouge durée=30 vitesse=200');
             $cmd->save();
         }
+    }
+
+    /* Un segment : une lumière, sans ce qui n'appartient qu'à l'appareil
+     * entier (presets, scènes, Wi-Fi, texte). */
+    private function createSegmentCommands() {
+        $on = $this->addCmdIfMissing('on', 'Etat', 'info', 'binary', array('order' => 1, 'generic' => 'LIGHT_STATE_BOOL'));
+        $bri = $this->addCmdIfMissing('brightness', 'Luminosité', 'info', 'numeric', array(
+            'order' => 2, 'generic' => 'LIGHT_BRIGHTNESS', 'unite' => '%', 'min' => 0, 'max' => 100));
+        $color = $this->addCmdIfMissing('color', 'Couleur', 'info', 'string', array('order' => 3, 'generic' => 'LIGHT_COLOR'));
+        $this->addCmdIfMissing('effect', 'Effet', 'info', 'string', array('order' => 4, 'isVisible' => 1));
+        $effectId = $this->addCmdIfMissing('effect_id', 'Numéro d\'effet', 'info', 'numeric', array('order' => 5));
+        $this->addCmdIfMissing('palette', 'Palette', 'info', 'string', array('order' => 6));
+        $paletteId = $this->addCmdIfMissing('palette_id', 'Numéro de palette', 'info', 'numeric', array('order' => 7));
+        $speed = $this->addCmdIfMissing('speed', 'Vitesse', 'info', 'numeric', array('order' => 8, 'min' => 0, 'max' => 255));
+        $intensity = $this->addCmdIfMissing('intensity', 'Intensité', 'info', 'numeric', array('order' => 9, 'min' => 0, 'max' => 255));
+        $this->addCmdIfMissing('online', 'En ligne', 'info', 'binary', array('order' => 12));
+        $this->addCmdIfMissing('verify_ok', 'Vérification', 'info', 'binary', array('order' => 14));
+        $this->addCmdIfMissing('verify_detail', 'Dernière vérification', 'info', 'string', array('order' => 15));
+
+        $this->addCmdIfMissing('on_set', 'Allumer', 'action', 'other', array('order' => 100, 'isVisible' => 1, 'generic' => 'LIGHT_ON', 'value' => $on));
+        $this->addCmdIfMissing('off_set', 'Éteindre', 'action', 'other', array('order' => 101, 'isVisible' => 1, 'generic' => 'LIGHT_OFF', 'value' => $on));
+        $this->addCmdIfMissing('toggle', 'Basculer', 'action', 'other', array('order' => 102, 'generic' => 'LIGHT_TOGGLE', 'value' => $on));
+        $this->addCmdIfMissing('brightness_set', 'Régler la luminosité', 'action', 'slider', array(
+            'order' => 103, 'isVisible' => 1, 'generic' => 'LIGHT_SLIDER', 'value' => $bri, 'min' => 0, 'max' => 100));
+        $this->addCmdIfMissing('color_set', 'Régler la couleur', 'action', 'color', array(
+            'order' => 104, 'isVisible' => 1, 'generic' => 'LIGHT_SET_COLOR', 'value' => $color));
+        $this->addCmdIfMissing('effect_set', 'Choisir un effet', 'action', 'select', array(
+            'order' => 105, 'isVisible' => 1, 'generic' => 'LIGHT_MODE', 'value' => $effectId));
+        $this->addCmdIfMissing('palette_set', 'Choisir une palette', 'action', 'select', array(
+            'order' => 106, 'isVisible' => 1, 'value' => $paletteId));
+        $this->addCmdIfMissing('speed_set', 'Régler la vitesse', 'action', 'slider', array(
+            'order' => 107, 'isVisible' => 1, 'value' => $speed, 'min' => 0, 'max' => 255));
+        $this->addCmdIfMissing('intensity_set', 'Régler l\'intensité', 'action', 'slider', array(
+            'order' => 108, 'isVisible' => 1, 'value' => $intensity, 'min' => 0, 'max' => 255));
+        $this->addCmdIfMissing('json_set', 'Envoyer un état JSON', 'action', 'message', array('order' => 110,
+            'display' => array('title_disable' => 1, 'message_placeholder' => '{"fx":1,"col":[[255,0,0]]}')));
+        $this->addCmdIfMissing('refresh', 'Rafraîchir', 'action', 'other', array('order' => 120, 'isVisible' => 1));
     }
 
     /* Un groupe n'a pas d'état propre à relire : seulement ce qui se déduit
@@ -3135,7 +3480,7 @@ class wledbe extends eqLogic {
             $this->publishCmd($logicalId, $value);
         }
         /* Un membre qui s'allume ou s'éteint change l'état de ses groupes. */
-        if (isset($_values['on']) && !$this->isGroup()) {
+        if (isset($_values['on']) && !$this->isGroup() && !$this->isSegment()) {
             $seen = $_values['on'] ? 'on' : 'off';
             if ($this->getCache('group_on_seen', '') !== $seen) {
                 $this->setCache('group_on_seen', $seen);
@@ -3164,9 +3509,13 @@ class wledbe extends eqLogic {
         $this->setCache('failures', $failures);
         $this->setCache('problem', $_message);
         $this->publishCmd('online', 0);
-        /* Premier échec : « Membres en ligne » des groupes change. */
+        /* Premier échec : « Membres en ligne » des groupes change, et les
+         * segments tombent avec leur WLED. */
         if ($failures === 1) {
             $this->groupsChanged();
+            foreach ($this->segments() as $segment) {
+                $segment->publishCmd('online', 0);
+            }
         }
         /* Un seul avertissement par panne : un journal qui répète la même
          * ligne chaque minute ne se lit plus. */
@@ -3220,6 +3569,18 @@ class wledbe extends eqLogic {
                 );
             }
             return array('id' => $this->getId(), 'group' => true, 'members' => $members, 'inactive' => $inactive);
+        }
+        if ($this->isSegment()) {
+            try {
+                $device = $this->device();
+                $seg = self::segmentOf($device->getCache('last_state', array()), $this->segmentId());
+                $parent = array('id' => $device->getId(), 'name' => $device->getHumanName(), 'online' => (int) $device->getCache('failures', 0) === 0);
+            } catch (Throwable $e) {
+                $seg = null;
+                $parent = array('id' => '', 'name' => '', 'online' => false, 'problem' => $e->getMessage());
+            }
+            return array('id' => $this->getId(), 'group' => false, 'segment' => $this->segmentId(), 'parent' => $parent,
+                         'present' => $seg !== null, 'raw' => $seg !== null ? $seg : array());
         }
         return array(
             'id'        => $this->getId(),

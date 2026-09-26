@@ -19,6 +19,8 @@ cloud ni broker MQTT.
   pile de priorités, garde qui réimpose une alarme défaite. Un petit démon PHP
   les réveille à la seconde près.
 - **Groupes** : plusieurs WLED pilotés d'un seul ordre, en parallèle.
+- **Segments** : chaque zone d'une bande découpée dans WLED devient une
+  lumière à part, pilotée et suivie séparément.
 - **Texte défilant** sur les matrices, avec couleur et durée.
 - **État instantané** : le démon garde une connexion WebSocket avec chaque
   WLED, l'état suit en une à deux secondes.

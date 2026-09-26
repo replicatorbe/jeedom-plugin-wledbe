@@ -280,6 +280,10 @@ function wledbeRender(_data) {
     wledbeRenderMembers(_data)
     return
   }
+  if (isset(_data) && _data.segment !== undefined) {
+    wledbeRenderSegment(_data)
+    return
+  }
   wledbeRenderMembers(null)
   var state = wledbeEl('div_wledbeState')
   if (state !== null && isset(_data)) {
@@ -308,6 +312,58 @@ function wledbeRender(_data) {
     var empty = !isset(_data) || !_data.raw || (Array.isArray(_data.raw) && _data.raw.length === 0)
     raw.textContent = empty ? '' : JSON.stringify(_data.raw, null, 2)
   }
+}
+
+/* Un segment : son WLED, et sa part du dernier état relu. */
+function wledbeRenderSegment(_data) {
+  wledbeRenderMembers(null)
+  var parent = _data.parent || {}
+  var link = wledbeEl('a_wledbeParent')
+  if (link !== null) {
+    link.textContent = parent.name || parent.problem || ''
+    link.setAttribute('href', parent.id ? 'index.php?v=d&m=wledbe&p=wledbe&id=' + encodeURIComponent(parent.id) : '#')
+  }
+  var state = wledbeEl('div_wledbeState')
+  if (state !== null) {
+    if (!parent.id) {
+      state.className = 'alert alert-danger'
+      state.textContent = parent.problem || '{{WLED introuvable}}'
+    } else if (!parent.online) {
+      state.className = 'alert alert-warning'
+      state.textContent = '{{Le WLED de ce segment ne répond pas.}}'
+    } else if (!_data.present) {
+      state.className = 'alert alert-warning'
+      state.textContent = '{{Le segment}} ' + _data.segment + ' {{n\'existe plus dans WLED (ou le WLED n\'a pas encore été relevé).}}'
+    } else {
+      state.className = 'alert alert-success'
+      state.textContent = '{{Segment}} ' + _data.segment + ' {{de}} ' + parent.name
+    }
+  }
+  var raw = wledbeEl('pre_wledbeSegmentRaw')
+  if (raw !== null) {
+    raw.textContent = _data.present ? JSON.stringify(_data.raw, null, 2) : ''
+  }
+}
+
+function wledbeCreateSegments() {
+  var id = wledbeCurrentId()
+  if (id === '') { return }
+  wledbeStatus('{{Lecture des segments…}}', 'default')
+  wledbeAjax('createSegments', { id: id }, function (result) {
+    var r = result.result
+    if (r.created.length === 0) {
+      wledbeStatus(r.segments <= 1
+        ? '{{Ce WLED n\'a qu\'un segment : créez des segments dans son interface, puis revenez ici.}}'
+        : '{{Tous les segments ont déjà leur équipement.}}', 'info')
+      return
+    }
+    wledbeAlert('{{Segments créés}}', '<ul><li>' + r.created.map(wledbeEscape).join('</li><li>') + '</li></ul>'
+      + '<p>{{Supprimez ceux qui ne vous servent pas : ils ne reviennent que si vous cliquez de nouveau sur « Créer les segments ».}}</p>', function () {
+      wledbeReload(id)
+    })
+  }, function (error) {
+    wledbeStatus((error && error.result) ? error.result : '{{Échec de la création}}', 'danger')
+  })
 }
 
 function wledbeRefresh() {
@@ -635,8 +691,15 @@ function printEqLogic(_eqLogic) {
      un WLED renommé en balisage ne doit rien exécuter dans la page. */
   var conf = isset(_eqLogic.configuration) ? _eqLogic.configuration : {}
   var group = conf.kind === 'group'
-  document.querySelectorAll('.wledbeGroupOnly').forEach(function (_el) { _el.style.display = group ? '' : 'none' })
-  document.querySelectorAll('.wledbeDeviceOnly').forEach(function (_el) { _el.style.display = group ? 'none' : '' })
+  var segment = conf.kind === 'segment'
+  var show = function (_selector, _visible) {
+    document.querySelectorAll(_selector).forEach(function (_el) { _el.style.display = _visible ? '' : 'none' })
+  }
+  show('.wledbeGroupOnly', group)
+  show('.wledbeSegmentOnly', segment)
+  show('.wledbeDeviceOnly', !group && !segment)
+  show('.wledbeLightOnly', !group)
+  wledbeText('span_wledbeSegmentId', segment ? '{{Segment}} ' + (conf.segment || 0) : '')
   wledbeMembersFromConf(conf.members)
   wledbeText('span_wledbeDeviceName', conf.device_name)
   wledbeText('span_wledbeLeds', conf.leds ? conf.leds + ' {{LED}}' : '')
@@ -733,6 +796,8 @@ window.wledbeHandlers = {
       bt_wledbeAddIp: wledbeAddIp,
       bt_wledbeRefresh: wledbeRefresh,
       bt_wledbeGroupRefresh: wledbeRefresh,
+      bt_wledbeSegmentRefresh: wledbeRefresh,
+      bt_wledbeSegments: wledbeCreateSegments,
       bt_wledbeLists: wledbeLists,
       bt_wledbeScenes: wledbeScenesToggle,
       bt_wledbeAddGroup: wledbeAddGroup,

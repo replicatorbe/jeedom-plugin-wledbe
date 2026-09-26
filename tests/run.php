@@ -829,5 +829,103 @@ $before = count(cmd::$table);
 $fake->createCommands();
 check('création idempotente', count(cmd::$table), $before);
 
+/* ------------------------------------------------------------------------ */
+section('Segments');
+
+/* Un WLED dont les segments sont donnés directement, et un segment dont le
+ * WLED est donné directement : ni l'un ni l'autre ne passe par la base. */
+class wledbeFakeDevice extends wledbeFake {
+    public $fakeSegments = array();
+    public function segments() { return $this->fakeSegments; }
+}
+class wledbeFakeSegment extends wledbe {
+    public $parentEq;
+    public function device() { return $this->parentEq; }
+}
+
+$zoneSeg = function ($_id, $_on) {
+    return array('id' => $_id, 'on' => $_on, 'bri' => 255, 'col' => array(array(255, 160, 0), array(0, 0, 0), array(0, 0, 0)),
+                 'fx' => 0, 'sx' => 128, 'ix' => 128, 'pal' => 0);
+};
+$d = new wledbeFakeDevice(); $d->id = 100;
+$d->configuration = array('ip' => '10.0.0.100', 'verify' => 1, 'layout' => 'strip');
+$d->setCache('fx_names', $eff); $d->setCache('pal_names', $pal);
+$d->state = array('on' => true, 'bri' => 128, 'mainseg' => 0, 'seg' => array($zoneSeg(0, true), $zoneSeg(1, true), $zoneSeg(2, true)));
+$d->createCommands();
+$z = new wledbeFakeSegment(); $z->id = 101; $z->parentEq = $d;
+$z->configuration = array('kind' => 'segment', 'parent' => 100, 'segment' => 1, 'verify' => 1);
+$z->createCommands();
+$d->fakeSegments = array($z);
+
+check('un segment est un segment', $z->isSegment(), true);
+check('un segment n\'est pas relevé pour lui-même', $z->isConfigured(), false);
+check('segment : pas de preset', $z->getCmd('action', 'preset_set'), null);
+check('segment : pas de scène', $z->getCmd('action', 'scene_start'), null);
+check('segment : lumière complète', is_object($z->getCmd('action', 'color_set')) && is_object($z->getCmd('info', 'brightness')), true);
+
+$d->publishState($d->state);
+check('état du WLED redistribué au segment', $z->published['on'] ?? null, 1);
+check('segment en ligne', $z->published['online'] ?? null, 1);
+check('luminosité du segment', $z->published['brightness'] ?? null, 100);
+check('le WLED garde son dernier état pour ses segments', isset($d->getCache('last_state')['seg']), true);
+
+$z->runAction('off_set', array());
+check('éteindre une zone : elle seule', array($d->state['seg'][0]['on'], $d->state['seg'][1]['on'], $d->state['seg'][2]['on']), array(true, false, true));
+check('éteindre une zone : le WLED reste allumé', $d->state['on'], true);
+check('segment éteint publié', $z->published['on'], 0);
+check('vérification du segment', $z->published['verify_ok'] ?? null, 1);
+
+$z->runAction('color_set', array('color' => '#00ff00'));
+check('couleur d\'une zone : elle seule', array($d->state['seg'][1]['col'][0], $d->state['seg'][0]['col'][0]), array(array(0, 255, 0), array(255, 160, 0)));
+check('couleur rallume la zone', $d->state['seg'][1]['on'], true);
+$z->runAction('brightness_set', array('slider' => 50));
+check('luminosité d\'une zone (50 % comme sur l\'appareil)', $d->state['seg'][1]['bri'], (int) round(50 * 2.55));
+check('luminosité générale inchangée', $d->state['bri'], 128);
+$z->runAction('effect_set', array('select' => 'Chase 2'));
+check('effet par son nom, sur la zone', $d->state['seg'][1]['fx'], 37);
+$z->runAction('json_set', array('message' => '{"sx":200,"id":0}'));
+check('JSON d\'un segment : vise ce segment, jamais un autre', array($d->state['seg'][1]['sx'], $d->state['seg'][0]['sx']), array(200, 128));
+
+/* WLED éteint : allumer une zone n'allume qu'elle. */
+$d->state['on'] = false;
+$d->publishState($d->state);
+check('WLED éteint : la zone est éteinte', $z->published['on'], 0);
+$z->runAction('on_set', array());
+check('allumer une zone d\'un WLED éteint : elle seule', array($d->state['on'], $d->state['seg'][0]['on'], $d->state['seg'][1]['on'], $d->state['seg'][2]['on']),
+    array(true, false, true, false));
+$z->runAction('toggle', array());
+check('éteindre la dernière zone allumée éteint le WLED', array($d->state['on'], $d->state['seg'][1]['on']), array(false, false));
+$z->runAction('toggle', array());
+check('basculer : la zone se rallume', array($d->state['on'], $d->state['seg'][1]['on']), array(true, true));
+
+$gone = new wledbeFakeSegment(); $gone->id = 102; $gone->parentEq = $d;
+$gone->configuration = array('kind' => 'segment', 'parent' => 100, 'segment' => 7, 'verify' => 1);
+$gone->createCommands();
+$d->fakeSegments = array($z, $gone);
+$d->publishState($d->state);
+check('segment disparu de WLED : hors ligne', $gone->published['online'] ?? null, 0);
+check('segment disparu : son voisin suit toujours', $z->published['online'], 1);
+
+$d->setCache('failures', 0);
+$d->noteFailure('Timeout');
+check('WLED injoignable : ses segments hors ligne', array($z->published['online'], $gone->published['online']), array(0, 0));
+check('l\'échec est compté sur le WLED, pas sur le segment', array((int) $d->getCache('failures'), (int) $z->getCache('failures', 0)), array(1, 0));
+
+$d->down = 5;
+$threw = false;
+try {
+    $z->runAction('on_set', array());
+} catch (Throwable $e) {
+    $threw = true;
+}
+check('ordre de segment sur un WLED muet : échec rendu', $threw, true);
+check('ordre de segment perdu : vérification du segment à 0', $z->published['verify_ok'], 0);
+$d->down = 0;
+
+$d->setCache('fx_names', $eff);
+$d->refreshLists();
+check('listes du WLED recopiées sur le segment', $z->getCmd('action', 'effect_set')->configuration['listValue'] ?? '',
+    $d->getCmd('action', 'effect_set')->configuration['listValue']);
+
 echo "\n" . $passed . ' réussi(s), ' . $failed . " échec(s)\n";
 exit($failed > 0 ? 1 : 0);

@@ -291,6 +291,50 @@ Un membre désactivé, supprimé ou sans adresse est ignoré. L'onglet Diagnosti
 du groupe liste ses membres, en ligne ou non, allumés ou non, et ceux qui sont
 ignorés avec la raison ; **Actualiser l'état des membres** le met à jour.
 
+## Les segments
+
+WLED peut découper une bande en **segments** : plusieurs zones sur le même
+contrôleur, chacune avec sa couleur, son effet et sa luminosité (le dessus et
+le dessous d'un meuble, les deux côtés d'une cuisine). Le plugin peut faire de
+chaque zone un **équipement à part** : une lumière que Jeedom, les scénarios
+et les applis domotiques (Homebridge, Google, JeedomConnect) pilotent
+séparément.
+
+Les segments se créent d'abord dans l'interface de WLED. Ensuite, sur la page
+de l'équipement du WLED, le bouton **Créer les segments** crée un équipement
+par segment qui n'en a pas encore, nommé d'après le WLED et le nom du segment
+dans WLED. Supprimez ceux dont vous n'avez pas l'usage : ils ne reviennent que
+si vous cliquez de nouveau sur le bouton. Un WLED d'un seul segment n'en crée
+aucun : son équipement pilote déjà toute la bande.
+
+Un segment a les commandes d'une lumière : Etat, Luminosité, Couleur, Effet,
+Palette, Vitesse, Intensité, En ligne, Vérification, et les actions
+correspondantes. Il n'a ni presets, ni scènes, ni texte : ils concernent
+l'appareil entier.
+
+Ce qu'il faut savoir :
+
+- **Un segment passe par son WLED.** Il n'a pas d'adresse à lui : relevé,
+  connexion directe et vérification des ordres sont ceux de l'appareil, et
+  l'état d'un segment suit en direct comme celui du WLED. Si le WLED ne
+  répond plus, ses segments passent hors ligne.
+- **Une zone n'éclaire que si le WLED est allumé.** « Etat » d'un segment vaut
+  1 seulement si le WLED et le segment sont allumés.
+- **Allumer une zone d'un WLED éteint n'allume qu'elle** : les autres zones
+  sont éteintes au passage, sans quoi WLED les rallumerait toutes.
+  Réciproquement, **éteindre la dernière zone allumée éteint le WLED**.
+- **La luminosité d'un segment** est la sienne ; WLED la multiplie par la
+  luminosité générale de l'appareil, que le segment ne change pas.
+- **Envoyer un état JSON**, sur un segment, attend un objet de segment :
+  `{"fx":1,"col":[[255,0,0]]}`. Il vise toujours ce segment.
+- **Une commande sur un segment est un geste manuel** sur son WLED : une scène
+  en cours sur l'appareil est abandonnée, comme pour ses propres commandes.
+- **Les scènes jouent sur l'appareil entier**, tous segments compris, puis
+  rendent chaque zone telle qu'elle était.
+- **Un segment supprimé dans WLED** garde son équipement, hors ligne ; le
+  supprimer du WLED dans Jeedom supprime ses segments.
+- Les segments ne peuvent pas encore entrer dans un groupe.
+
 ## Texte sur une matrice
 
 Sur une matrice, la commande **Afficher un texte** fait défiler un texte, le

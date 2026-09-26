@@ -82,7 +82,7 @@ try {
         if ($eqLogic->isGroup()) {
             $eqLogic->refreshGroup();
         } else {
-            $eqLogic->pollNow();
+            $eqLogic->device()->pollNow();
         }
         ajax::success($eqLogic->toAjax());
     }
@@ -90,7 +90,7 @@ try {
     if (init('action') == 'lists') {
         unautorizedInDemo();
         $eqLogic = wledbeEq();
-        $counts = $eqLogic->refreshLists();
+        $counts = $eqLogic->device()->refreshLists();
         $result = $eqLogic->toAjax();
         $result['counts'] = $counts;
         ajax::success($result);
@@ -103,7 +103,7 @@ try {
         $effects = array();
         $palettes = array();
         foreach (wledbe::byType('wledbe', true) as $eqLogic) {
-            if ($eqLogic->isGroup()) {
+            if ($eqLogic->isGroup() || $eqLogic->isSegment()) {
                 continue;
             }
             $devices[] = array('id' => $eqLogic->getId(), 'name' => $eqLogic->getHumanName(), 'matrix' => $eqLogic->isMatrix());
@@ -150,6 +150,12 @@ try {
     if (init('action') == 'stopScenes') {
         unautorizedInDemo();
         ajax::success(wledbeEq()->stopScenes(true));
+    }
+
+    /* Un équipement par segment du WLED qui n'en a pas encore. */
+    if (init('action') == 'createSegments') {
+        unautorizedInDemo();
+        ajax::success(wledbeEq()->createSegments());
     }
 
     if (init('action') == 'createGroup') {
