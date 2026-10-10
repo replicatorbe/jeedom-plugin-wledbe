@@ -16,15 +16,19 @@
  */
 
 /*
- * Démon des scènes WLED : une minuterie, rien de plus.
+ * Démon WLED : deux rôles, et pas un de plus.
  *
- * Il n'existe que parce que le cron de Jeedom ne descend pas sous la minute,
- * alors qu'une sonnette doit s'éteindre au bout de dix secondes. Il demande
- * au plugin le planning des réveils (un instant par appareil), attend, et
- * rappelle le plugin à l'heure dite. Il ne parle jamais à un WLED et ne
- * connaît ni les scènes ni les priorités : tout cela reste dans la classe,
- * à un seul endroit, et le cron passe par exactement le même chemin quand le
- * démon est arrêté.
+ * Une minuterie, d'abord. Le cron de Jeedom ne descend pas sous la minute,
+ * alors qu'une sonnette doit s'éteindre au bout de dix secondes. Le démon
+ * demande au plugin le planning des réveils (un instant par appareil), attend,
+ * et rappelle le plugin à l'heure dite. Il ne connaît ni les scènes ni les
+ * priorités : tout cela reste dans la classe, à un seul endroit, et le cron
+ * passe par exactement le même chemin quand le démon est arrêté.
+ *
+ * Une oreille, ensuite. Il garde une connexion WebSocket ouverte avec chaque
+ * WLED, qui y pousse son état à chaque changement, et le transmet au plugin
+ * (voir plus bas). C'est la seule chose qu'il dise jamais à un WLED : il
+ * écoute, il n'envoie aucun ordre.
  *
  * Il ne charge pas core.inc.php : PHP en ligne de commande et l'extension
  * curl, déjà exigée par Jeedom, suffisent.
