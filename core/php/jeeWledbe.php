@@ -28,7 +28,11 @@
 
 require_once __DIR__ . '/../../../../core/php/core.inc.php';
 
-if (!jeedom::apiAccess(init('apikey'), 'wledbe')) {
+/* La seule clé du plugin : jeedom::apiAccess() accepterait aussi celle de
+ * n'importe quel utilisateur. apiAccess() reste appelé pour son contrôle
+ * d'origine (accès du plugin limité à localhost). */
+if (!is_string(init('apikey')) || !hash_equals(jeedom::getApiKey('wledbe'), init('apikey'))
+    || !jeedom::apiAccess(init('apikey'), 'wledbe')) {
     http_response_code(401);
     echo 'Not authorized';
     die();

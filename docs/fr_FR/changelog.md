@@ -1,5 +1,10 @@
 # Changelog — plugin WLED
 
+## 0.4.4 (beta)
+
+- Le point d'entrée appelé par le démon n'accepte plus que la clé API du
+  plugin : la clé personnelle d'un utilisateur Jeedom y donnait aussi accès.
+
 ## 0.4.3 (beta)
 
 - Découverte : « Rechercher des WLED » lance la recherche dès le clic, sur
