@@ -1,5 +1,11 @@
 # Changelog — plugin WLED
 
+## 0.4.5 (beta)
+
+- Arrêt du démon propre : il reçoit SIGTERM et a jusqu'à dix secondes pour
+  fermer ses connexions aux WLED avant un kill -9, qui le suivait jusqu'ici
+  aussitôt.
+
 ## 0.4.4 (beta)
 
 - Le point d'entrée appelé par le démon n'accepte plus que la clé API du
